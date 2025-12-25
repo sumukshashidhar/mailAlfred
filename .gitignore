@@ -2,6 +2,10 @@
 __pycache__/
 *.py[codz]
 *$py.class
+# so that people can bring their own agents
+AGENTS.md 
+# so that people can bring their own workflows
+.dev/
 
 # C extensions
 *.so
@@ -205,3 +209,10 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Gmail OAuth credentials
+credentials.json
+token.json
+
+# Cache directory
+.cache/
