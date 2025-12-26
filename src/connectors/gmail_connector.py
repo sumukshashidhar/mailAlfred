@@ -132,23 +132,49 @@ class GmailConnector:
 
     def __iter__(self) -> Iterator[Email]:
         """Iterate over new (unseen) emails, stopping at first seen email."""
-        return _EmailIterator(
-            service=self.service,
-            seen_cache=self._seen_cache,
-            label_ids=self._label_ids,
-            query=self._query,
-            use_seen_cache=True,
+        return self.iter_messages()
+
+    def fetch_all(
+        self,
+        message_format: str = "full",
+        metadata_headers: Optional[list[str]] = None,
+    ) -> Iterator[Email]:
+        """Iterate over ALL emails (ignores seen cache, doesn't stop early)."""
+        return self.iter_messages(
+            use_seen_cache=False,
+            message_format=message_format,
+            metadata_headers=metadata_headers,
         )
 
-    def fetch_all(self) -> Iterator[Email]:
-        """Iterate over ALL emails (ignores seen cache, doesn't stop early)."""
+    def iter_messages(
+        self,
+        use_seen_cache: bool = True,
+        message_format: str = "full",
+        metadata_headers: Optional[list[str]] = None,
+    ) -> Iterator[Email]:
+        """Iterate over emails with configurable Gmail format and metadata headers."""
         return _EmailIterator(
             service=self.service,
             seen_cache=self._seen_cache,
             label_ids=self._label_ids,
             query=self._query,
-            use_seen_cache=False,
+            use_seen_cache=use_seen_cache,
+            message_format=message_format,
+            metadata_headers=metadata_headers,
         )
+
+    def fetch_email(
+        self,
+        msg_id: str,
+        message_format: str = "full",
+        metadata_headers: Optional[list[str]] = None,
+    ) -> Email:
+        """Fetch a single email by ID with the requested Gmail message format."""
+        params = {"userId": "me", "id": msg_id, "format": message_format}
+        if message_format == "metadata" and metadata_headers:
+            params["metadataHeaders"] = metadata_headers
+        msg = self.service.users().messages().get(**params).execute()
+        return _EmailIterator.parse_message(msg)
 
     # -------------------------------------------------------------------------
     # Seen Cache Management
@@ -243,12 +269,16 @@ class _EmailIterator:
         label_ids: list[str],
         query: Optional[str],
         use_seen_cache: bool = True,
+        message_format: str = "full",
+        metadata_headers: Optional[list[str]] = None,
     ):
         self._service = service
         self._seen_cache = seen_cache
         self._label_ids = label_ids
         self._query = query
         self._use_seen_cache = use_seen_cache
+        self._message_format = message_format
+        self._metadata_headers = metadata_headers
         
         self._page: list[dict] = []
         self._index: int = 0
@@ -309,12 +339,14 @@ class _EmailIterator:
 
     def _fetch_email(self, msg_id: str) -> Email:
         """Fetch and parse a single email."""
-        msg = self._service.users().messages().get(
-            userId="me", id=msg_id, format="full"
-        ).execute()
-        return self._parse(msg)
+        params = {"userId": "me", "id": msg_id, "format": self._message_format}
+        if self._message_format == "metadata" and self._metadata_headers:
+            params["metadataHeaders"] = self._metadata_headers
+        msg = self._service.users().messages().get(**params).execute()
+        return self.parse_message(msg)
 
-    def _parse(self, msg: dict) -> Email:
+    @staticmethod
+    def parse_message(msg: dict) -> Email:
         """Parse Gmail API message into Email model."""
         payload = msg.get("payload", {})
         headers = {h["name"].lower(): h["value"] for h in payload.get("headers", [])}
@@ -328,15 +360,15 @@ class _EmailIterator:
                 pass
         
         # Parse body
-        body_plain, body_html = self._extract_body(payload)
+        body_plain, body_html = _EmailIterator._extract_body(payload)
         
         return Email(
             id=msg["id"],
             thread_id=msg["threadId"],
             subject=headers.get("subject", ""),
             sender=headers.get("from", ""),
-            recipients=self._split_addresses(headers.get("to", "")),
-            cc=self._split_addresses(headers.get("cc", "")),
+            recipients=_EmailIterator._split_addresses(headers.get("to", "")),
+            cc=_EmailIterator._split_addresses(headers.get("cc", "")),
             date=date,
             snippet=msg.get("snippet", ""),
             body_plain=body_plain,
@@ -349,7 +381,8 @@ class _EmailIterator:
         """Split comma-separated email addresses."""
         return [addr.strip() for addr in value.split(",")] if value else []
 
-    def _extract_body(self, payload: dict) -> tuple[str, str]:
+    @staticmethod
+    def _extract_body(payload: dict) -> tuple[str, str]:
         """Extract plain and HTML body from message payload."""
         plain, html = "", ""
         
