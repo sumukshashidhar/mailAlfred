@@ -27,6 +27,7 @@ from src.utils.inference import do_structured_output_inference
 
 # Default concurrency for parallel processing
 DEFAULT_CONCURRENCY = 10
+METADATA_HEADERS = ["From", "To", "Cc", "Subject", "Date"]
 
 # Rich console
 console = Console()
@@ -135,6 +136,7 @@ async def process_emails(
     """
     stats: dict[str, int] = {}
     emails_to_process: list[Email] = []
+    emails_to_process_meta: list[Email] = []
     skipped = 0
     scanned = 0
     
@@ -155,17 +157,21 @@ async def process_emails(
             total=scan_limit if scan_limit else None,
         )
         
-        for email in gmail.fetch_all():
+        for email in gmail.iter_messages(
+            use_seen_cache=True,
+            message_format="metadata",
+            metadata_headers=METADATA_HEADERS,
+        ):
             scanned += 1
-            progress.update(scan_task, completed=scanned, description=f"[cyan]Scanning... ({len(emails_to_process)} to classify, {skipped} done)")
+            progress.update(scan_task, completed=scanned, description=f"[cyan]Scanning... ({len(emails_to_process_meta)} to classify, {skipped} done)")
             
             if is_already_classified(email, gmail):
                 skipped += 1
                 continue
             
-            emails_to_process.append(email)
+            emails_to_process_meta.append(email)
             
-            if limit and len(emails_to_process) >= limit:
+            if limit and len(emails_to_process_meta) >= limit:
                 break
             
             if scan_limit and scanned >= scan_limit:
@@ -173,9 +179,24 @@ async def process_emails(
         
         progress.update(scan_task, completed=scanned, description=f"[green]✓ Scan complete")
     
-    if not emails_to_process:
+    if not emails_to_process_meta:
         console.print(f"\n[green]✅ No unclassified emails found.[/green] (Scanned {scanned}, skipped {skipped})")
         return stats
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        fetch_task = progress.add_task(
+            "[cyan]Loading email content...",
+            total=len(emails_to_process_meta),
+        )
+        for meta_email in emails_to_process_meta:
+            emails_to_process.append(gmail.fetch_email(meta_email.id, message_format="full"))
+            progress.advance(fetch_task)
     
     console.print(f"\n[bold]Found {len(emails_to_process)} emails to classify[/bold] (concurrency: {concurrency})")
     if dry_run:
