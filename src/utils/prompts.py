@@ -1,13 +1,22 @@
 from pathlib import Path
+from functools import lru_cache
 from datetime import datetime
 from src.models.email import Email
 from src.models.classified_email import ALLOWED_LABELS
 
 
+MAX_BODY_CHARS = 4000
+
+@lru_cache(maxsize=1)
 def _read_prompt_from_file() -> str:
     """Read the classification prompt template from the markdown file."""
     prompt_path = Path(__file__).parent.parent.parent / "prompts" / "CLASSIFICATION_PROMPT.md"
     return prompt_path.read_text()
+
+def _truncate_body(body: str) -> str:
+    if len(body) <= MAX_BODY_CHARS:
+        return body
+    return body[:MAX_BODY_CHARS] + "\n\n[truncated]"
 
 
 def get_email_classification_prompt(source_email: Email) -> str:
@@ -28,6 +37,7 @@ def get_email_classification_prompt(source_email: Email) -> str:
     
     # Use plain text body, fall back to snippet if empty
     body = source_email.body_plain.strip() if source_email.body_plain else source_email.snippet
+    body = _truncate_body(body)
     
     # Build the email context
     email_context = f"""
