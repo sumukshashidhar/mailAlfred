@@ -27,6 +27,7 @@ from src.utils.inference import do_structured_output_inference
 
 # Default concurrency for parallel processing
 DEFAULT_CONCURRENCY = 10
+MAX_GMAIL_BATCH_SIZE = 1000
 METADATA_HEADERS = ["From", "To", "Cc", "Subject", "Date"]
 
 # Rich console
@@ -74,23 +75,21 @@ def is_already_classified(email: Email, gmail: GmailConnector) -> bool:
 
 async def classify_email_task(
     email: Email,
-    semaphore: asyncio.Semaphore,
     progress: Progress,
     task_id,
 ) -> ClassificationResult:
-    """Classify a single email using the LLM (with concurrency control)."""
-    async with semaphore:
-        try:
-            prompt = get_email_classification_prompt(email)
-            result = await do_structured_output_inference(
-                user_prompt=prompt,
-                schema=ClassifiedEmail,
-            )
-            progress.advance(task_id)
-            return ClassificationResult(email=email, label=result.label)
-        except Exception as e:
-            progress.advance(task_id)
-            return ClassificationResult(email=email, error=str(e))
+    """Classify a single email using the LLM."""
+    try:
+        prompt = get_email_classification_prompt(email)
+        result = await do_structured_output_inference(
+            user_prompt=prompt,
+            schema=ClassifiedEmail,
+        )
+        progress.advance(task_id)
+        return ClassificationResult(email=email, label=result.label)
+    except Exception as e:
+        progress.advance(task_id)
+        return ClassificationResult(email=email, error=str(e))
 
 
 def print_summary(stats: dict[str, int], scanned: int, skipped: int, dry_run: bool) -> None:
@@ -121,6 +120,11 @@ def print_summary(stats: dict[str, int], scanned: int, skipped: int, dry_run: bo
     
     console.print()
     console.print(table)
+
+
+def _chunked(items: list, size: int):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
 
 
 async def process_emails(
@@ -217,17 +221,20 @@ async def process_emails(
             total=len(emails_to_process),
         )
         
-        semaphore = asyncio.Semaphore(concurrency)
-        tasks = [
-            classify_email_task(email, semaphore, progress, classify_task)
-            for email in emails_to_process
-        ]
-        
-        results: list[ClassificationResult] = await asyncio.gather(*tasks)
+        results: list[ClassificationResult] = []
+        batch_size = max(1, concurrency)
+        for batch in _chunked(emails_to_process, batch_size):
+            tasks = [
+                classify_email_task(email, progress, classify_task)
+                for email in batch
+            ]
+            results.extend(await asyncio.gather(*tasks))
     
     # Phase 3: Apply labels and show results
     console.print()
     
+    label_groups: dict[str, list[str]] = {}
+
     for result in results:
         subject_preview = result.email.subject[:60] + "..." if len(result.email.subject) > 60 else result.email.subject
         sender_preview = result.email.sender[:30] + "..." if len(result.email.sender) > 30 else result.email.sender
@@ -244,11 +251,16 @@ async def process_emails(
             short_label = label.replace("classifications/", "")
             
             if not dry_run:
-                gmail.classify_email(result.email.id, label)
+                label_groups.setdefault(label, []).append(result.email.id)
             
             if verbose or label == "classifications/requires_action":
                 console.print(f"[{color}]●[/{color}] [{color}]{short_label}[/{color}] [dim]{sender_preview}[/dim]")
                 console.print(f"  {subject_preview}")
+
+    if not dry_run:
+        for label, email_ids in label_groups.items():
+            for batch in _chunked(email_ids, MAX_GMAIL_BATCH_SIZE):
+                gmail.add_labels_bulk(batch, [label])
     
     # Print summary
     print_summary(stats, scanned, skipped, dry_run)

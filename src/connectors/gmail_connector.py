@@ -240,6 +240,14 @@ class GmailConnector:
             userId="me", id=email_id, body={"addLabelIds": label_ids}
         ).execute()
 
+    def add_labels_bulk(self, email_ids: list[str], label_names: list[str]) -> None:
+        """Add labels to multiple emails using Gmail batchModify."""
+        if not email_ids:
+            return
+        label_ids = [self.get_or_create_label(name) for name in label_names]
+        body = {"ids": email_ids, "addLabelIds": label_ids}
+        self.service.users().messages().batchModify(userId="me", body=body).execute()
+
     def remove_labels(self, email_id: str, label_names: list[str]) -> None:
         """Remove labels from an email."""
         label_ids = [lid for name in label_names if (lid := self.get_label_id(name))]
