@@ -1,21 +1,34 @@
 from pydantic import BaseModel, Field, field_validator
 
 ALLOWED_LABELS = {
-    "classifications/bulk_content",
-    "classifications/marketing",
-    "classifications/notifications",
-    "classifications/read_later",
-    "classifications/records",
+    "classifications/respond",
+    "classifications/urgent",
+    "classifications/action",
     "classifications/opportunities",
-    "classifications/requires_action",
+    "classifications/academic",
+    "classifications/notifications",
+    "classifications/records",
+    "classifications/read_later",
+    "classifications/marketing",
+    "classifications/bulk",
     "classifications/unsure",
 }
 
 LABEL_ALIASES = {
+    # Old labels → new canonical names
+    "classifications/requires_action": "classifications/respond",
+    "classifications/bulk_content": "classifications/bulk",
+    # Typo aliases (keep existing)
     "classification/notifications": "classifications/notifications",
     "classfications/notifications": "classifications/notifications",
     "classification/marketing": "classifications/marketing",
     "classfications/marketing": "classifications/marketing",
+    # New typo aliases
+    "classification/respond": "classifications/respond",
+    "classification/urgent": "classifications/urgent",
+    "classification/action": "classifications/action",
+    "classification/academic": "classifications/academic",
+    "classification/bulk": "classifications/bulk",
 }
 
 

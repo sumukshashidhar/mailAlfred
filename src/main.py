@@ -39,13 +39,16 @@ _classification_label_ids: set[str] = set()
 
 # Label colors for rich output
 LABEL_COLORS = {
-    "classifications/bulk_content": "dim",
-    "classifications/marketing": "bright_black",
-    "classifications/notifications": "blue",
-    "classifications/read_later": "cyan",
-    "classifications/records": "yellow",
+    "classifications/respond": "bold red",
+    "classifications/urgent": "bold yellow",
+    "classifications/action": "yellow",
     "classifications/opportunities": "green",
-    "classifications/requires_action": "bold red",
+    "classifications/academic": "bright_cyan",
+    "classifications/notifications": "blue",
+    "classifications/records": "bright_black",
+    "classifications/read_later": "cyan",
+    "classifications/marketing": "dim",
+    "classifications/bulk": "dim",
     "classifications/unsure": "magenta",
     "errors": "red",
 }
@@ -256,7 +259,7 @@ async def process_emails(
             if not dry_run:
                 label_groups.setdefault(label, []).append(result.email.id)
             
-            if verbose or label == "classifications/requires_action":
+            if verbose or label in ("classifications/respond", "classifications/urgent"):
                 console.print(f"[{color}]●[/{color}] [{color}]{short_label}[/{color}] [dim]{sender_preview}[/dim]")
                 console.print(f"  {subject_preview}")
 
