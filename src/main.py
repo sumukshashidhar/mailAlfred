@@ -40,8 +40,11 @@ _classification_label_ids: set[str] = set()
 # Label colors for rich output
 LABEL_COLORS = {
     "classifications/bulk_content": "dim",
+    "classifications/marketing": "bright_black",
+    "classifications/notifications": "blue",
     "classifications/read_later": "cyan",
     "classifications/records": "yellow",
+    "classifications/opportunities": "green",
     "classifications/requires_action": "bold red",
     "classifications/unsure": "magenta",
     "errors": "red",

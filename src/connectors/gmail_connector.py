@@ -18,6 +18,7 @@ Usage:
 
 import base64
 import os
+import webbrowser
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Iterator, Optional
@@ -119,7 +120,11 @@ class GmailConnector:
                         "Download from Google Cloud Console → APIs & Services → Credentials"
                     )
                 flow = InstalledAppFlow.from_client_secrets_file(self._credentials_path, SCOPES)
-                creds = flow.run_local_server(port=0)
+                try:
+                    creds = flow.run_local_server(port=0)
+                except webbrowser.Error:
+                    print("No runnable browser detected; falling back to manual auth flow.")
+                    creds = flow.run_local_server(port=0, open_browser=False)
             
             with open(self._token_path, "w") as f:
                 f.write(creds.to_json())

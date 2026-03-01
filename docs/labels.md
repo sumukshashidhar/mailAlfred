@@ -4,9 +4,12 @@ mailAlfred uses a small, explicit taxonomy to keep the workflow focused. Labels 
 
 ## Taxonomy
 
-- `classifications/bulk_content` - Newsletters, promotions, automated notifications, bulk mail, login alerts, CFPs.
+- `classifications/bulk_content` - Generic low-value bulk mail (digests, list blasts, cold outbound, mail-merge greetings).
+- `classifications/marketing` - Promotional or commercial campaigns: discounts, launches, upsells, and product marketing.
+- `classifications/notifications` - Automated account/service updates that are informational and usually non-actionable.
 - `classifications/read_later` - Informational content worth reading but not urgent.
 - `classifications/records` - Receipts, paid invoices, order confirmations, statements.
+- `classifications/opportunities` - Mass-mailed opportunities like grants, CFPs, fellowships, jobs, or funding calls (not warm intros).
 - `classifications/requires_action` - Directly addressed messages, approvals, unpaid invoices, security alerts, time-sensitive requests.
 - `classifications/unsure` - Anything that does not fit cleanly elsewhere.
 
