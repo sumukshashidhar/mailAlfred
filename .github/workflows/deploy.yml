@@ -1,0 +1,67 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      smoke_run:
+        description: "Run one immediate mailAlfred service execution after deploy"
+        type: choice
+        required: true
+        default: "false"
+        options:
+          - "false"
+          - "true"
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mailalfred-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to apexrouter
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+
+    steps:
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          : "${DEPLOY_SSH_KEY:?DEPLOY_SSH_KEY secret is required}"
+          : "${DEPLOY_KNOWN_HOSTS:?DEPLOY_KNOWN_HOSTS secret is required}"
+
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Deploy on server
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          WORKFLOW_SMOKE_RUN: ${{ github.event.inputs.smoke_run }}
+        run: |
+          set -euo pipefail
+          : "${DEPLOY_HOST:?DEPLOY_HOST secret is required}"
+          : "${DEPLOY_USER:?DEPLOY_USER secret is required}"
+
+          DEPLOY_PORT="${DEPLOY_PORT:-22}"
+          if [ "${WORKFLOW_SMOKE_RUN:-false}" = "true" ]; then
+            SMOKE_RUN=1
+          else
+            SMOKE_RUN=0
+          fi
+
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd /root/mail_processing/mailAlfred && SMOKE_RUN=$SMOKE_RUN ./scripts/deploy.sh"

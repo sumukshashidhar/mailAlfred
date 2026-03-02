@@ -18,6 +18,7 @@ Welcome to the mailAlfred docs. This guide is organized for quick setup and deep
 
 - `cli-reference.md` - Command-line options and examples
 - `labels.md` - Classification labels and taxonomy guidance
+- `cicd.md` - GitHub Actions CI/CD and server deployment setup
 
 ## Architecture
 

@@ -47,6 +47,7 @@ Start here: `docs/README.md`.
 - Getting started and setup guides
 - CLI reference and labels
 - Architecture and extension points
+- CI/CD setup and deployment workflow
 - Troubleshooting and contributing
 
 ## Project Layout
