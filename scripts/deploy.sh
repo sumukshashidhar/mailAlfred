@@ -5,6 +5,7 @@ APP_DIR="${APP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 REMOTE="${REMOTE:-origin}"
 BRANCH="${BRANCH:-main}"
 SMOKE_RUN="${SMOKE_RUN:-0}"
+UV_BIN="${UV_BIN:-}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -14,9 +15,19 @@ require_cmd() {
 }
 
 require_cmd git
-require_cmd uv
 require_cmd systemctl
 require_cmd flock
+
+if [ -z "$UV_BIN" ]; then
+  if command -v uv >/dev/null 2>&1; then
+    UV_BIN="$(command -v uv)"
+  elif [ -x /root/.local/bin/uv ]; then
+    UV_BIN="/root/.local/bin/uv"
+  else
+    echo "[deploy] missing required command: uv (set UV_BIN or install uv)" >&2
+    exit 1
+  fi
+fi
 
 cd "$APP_DIR"
 
@@ -47,7 +58,7 @@ echo "[deploy] applying fast-forward update"
 git pull --ff-only "$REMOTE" "$BRANCH"
 
 echo "[deploy] syncing dependencies with uv lock"
-uv sync --frozen
+"$UV_BIN" sync --frozen
 
 echo "[deploy] reloading systemd units"
 systemctl daemon-reload
