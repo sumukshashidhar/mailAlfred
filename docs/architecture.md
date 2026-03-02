@@ -28,7 +28,7 @@ Gmail API -> Email model -> Prompt -> LLM -> ClassifiedEmail -> Gmail label
   - Optional seen-email cache for incremental iteration
 
 - `src/utils/prompts.py`
-  - Loads `prompts/CLASSIFICATION_PROMPT.md`
+  - Loads `prompts/CLASSIFICATION_PROMPT.j2`
   - Injects email context and current timestamp
 
 - `src/utils/inference.py`
@@ -52,7 +52,7 @@ mailAlfred treats Gmail labels as the source of truth. If a message already has 
 
 mailAlfred is intentionally modular. Common extensions include:
 
-- Custom label taxonomies (`src/models/classified_email.py` and `prompts/CLASSIFICATION_PROMPT.md`)
+- Custom label taxonomies (`src/models/classified_email.py` and `prompts/CLASSIFICATION_PROMPT.j2`)
 - Alternative prompt formats or richer context (`src/utils/prompts.py`)
 - New connectors (e.g., IMAP, Outlook) by mirroring the `GmailConnector` interface
 - Different LLM backends (replace or wrap `src/utils/inference.py`)

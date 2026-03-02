@@ -83,7 +83,7 @@ Add backwards-compatible aliases for old label names."
 ### Task 2: Rewrite the classification prompt
 
 **Files:**
-- Modify: `prompts/CLASSIFICATION_PROMPT.md`
+- Modify: `prompts/CLASSIFICATION_PROMPT.j2`
 
 **Step 1: Replace the entire prompt file**
 
@@ -157,7 +157,7 @@ Expected: Prints prompt length and "OK".
 **Step 3: Commit**
 
 ```bash
-git add prompts/CLASSIFICATION_PROMPT.md
+git add prompts/CLASSIFICATION_PROMPT.j2
 git commit -m "feat: rewrite classification prompt for 12-label taxonomy
 
 Organized by triage tiers (4 levels from bulk to respond).
@@ -275,7 +275,7 @@ mailAlfred uses a 12-label taxonomy organized by triage behavior. Labels are sto
 To change labels:
 
 1. Update `ALLOWED_LABELS` in `src/models/classified_email.py`.
-2. Update guidance in `prompts/CLASSIFICATION_PROMPT.md` to match.
+2. Update guidance in `prompts/CLASSIFICATION_PROMPT.j2` to match.
 3. Adjust `LABEL_COLORS` in `src/main.py` for display.
 ```
 

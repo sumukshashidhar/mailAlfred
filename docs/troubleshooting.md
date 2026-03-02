@@ -34,7 +34,7 @@
 
 **Structured output parsing fails**
 - Make sure the provider supports structured output
-- Tighten instructions in `prompts/CLASSIFICATION_PROMPT.md`
+- Tighten instructions in `prompts/CLASSIFICATION_PROMPT.j2`
 
 ## Classification behavior
 

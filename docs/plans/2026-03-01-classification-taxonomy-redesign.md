@@ -70,7 +70,7 @@ Old labels to alias:
 - `classifications/requires_action` → keep as alias, map to `classifications/respond` (safest default)
 - `classifications/bulk_content` → keep as alias, map to `classifications/bulk`
 
-### 2. Classification prompt (`prompts/CLASSIFICATION_PROMPT.md`)
+### 2. Classification prompt (`prompts/CLASSIFICATION_PROMPT.j2`)
 
 Rewrite with:
 - 12 labels organized by tier (sieve metaphor preserved)

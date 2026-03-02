@@ -36,5 +36,5 @@ mailAlfred uses a 12-label taxonomy organized by triage behavior. Labels are sto
 To change labels:
 
 1. Update `ALLOWED_LABELS` in `src/models/classified_email.py`.
-2. Update guidance in `prompts/CLASSIFICATION_PROMPT.md` to match.
+2. Update guidance in `prompts/CLASSIFICATION_PROMPT.j2` to match.
 3. Adjust `LABEL_COLORS` in `src/main.py` for display.

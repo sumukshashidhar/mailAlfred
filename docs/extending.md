@@ -26,7 +26,7 @@ Classification expects:
 
 ## Prompt template
 
-Prompts are loaded from `prompts/CLASSIFICATION_PROMPT.md` and combined with email context in `src/utils/prompts.py`.
+Prompts are loaded from `prompts/CLASSIFICATION_PROMPT.j2` and combined with email context in `src/utils/prompts.py`.
 
 Common extensions:
 

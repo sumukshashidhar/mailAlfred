@@ -56,7 +56,7 @@ Start here: `docs/README.md`.
 - `src/utils/inference.py` - LLM inference and retries
 - `src/utils/prompts.py` - Prompt assembly
 - `src/models/` - Pydantic models
-- `prompts/CLASSIFICATION_PROMPT.md` - Classification instructions
+- `prompts/CLASSIFICATION_PROMPT.j2` - Classification instructions
 - `docs/` - Documentation
 
 ## License
