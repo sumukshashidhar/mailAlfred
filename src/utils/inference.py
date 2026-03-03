@@ -6,6 +6,7 @@ import os
 import asyncio
 from typing import TypeVar
 from dotenv import load_dotenv
+from loguru import logger
 from pydantic import BaseModel
 from tenacity import (
     retry,
@@ -80,5 +81,5 @@ async def do_structured_output_inference(
 
 if __name__ == "__main__":
     response = asyncio.run(do_structured_output_inference("Give me a mock calendar event", CalendarEvent))
-    print(response)
-    print(type(response))
+    logger.info(response)
+    logger.info(type(response))

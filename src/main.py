@@ -66,10 +66,9 @@ def _get_classification_label_ids(gmail: GmailConnector) -> set[str]:
     """Get the Gmail label IDs for all classification labels."""
     global _classification_label_ids
     if not _classification_label_ids:
-        for label_name in ALLOWED_LABELS:
-            label_id = gmail.get_label_id(label_name)
-            if label_id:
-                _classification_label_ids.add(label_id)
+        _classification_label_ids |= {
+            label_id for label_name in ALLOWED_LABELS if (label_id := gmail.get_label_id(label_name))
+        }
     return _classification_label_ids
 
 
@@ -133,6 +132,106 @@ def _chunked(items: list, size: int):
         yield items[i:i + size]
 
 
+def _scan_limit_reached(limit: Optional[int], scan_limit: Optional[int], queued: int, scanned: int) -> bool:
+    return bool((limit and queued >= limit) or (scan_limit and scanned >= scan_limit))
+
+
+def _scan_unclassified_emails(
+    gmail: GmailConnector,
+    progress: Progress,
+    task_id,
+    limit: Optional[int],
+    scan_limit: Optional[int],
+) -> tuple[list[Email], int, int]:
+    emails_to_process_meta: list[Email] = []
+    scanned = 0
+    skipped = 0
+    for email in gmail.iter_messages(
+        use_seen_cache=True,
+        message_format="metadata",
+        metadata_headers=METADATA_HEADERS,
+    ):
+        scanned += 1
+        progress.update(task_id, completed=scanned, description=f"[cyan]Scanning... ({len(emails_to_process_meta)} to classify, {skipped} done)")
+        if is_already_classified(email, gmail):
+            skipped += 1
+            continue
+        emails_to_process_meta.append(email)
+        if _scan_limit_reached(limit, scan_limit, len(emails_to_process_meta), scanned):
+            break
+    return emails_to_process_meta, scanned, skipped
+
+
+def _preview(value: str, limit: int) -> str:
+    return value if len(value) <= limit else f"{value[:limit]}..."
+
+
+def _record_classification_result(
+    result: ClassificationResult,
+    dry_run: bool,
+    verbose: bool,
+    stats: dict[str, int],
+    label_groups: dict[str, list[str]],
+) -> None:
+    subject_preview = _preview(result.email.subject, 60)
+    sender_preview = _preview(result.email.sender, 30)
+    if result.error:
+        console.print(f"[red]✗[/red] [dim]{sender_preview}[/dim]")
+        console.print(f"  {subject_preview}")
+        console.print(f"  [red]Error: {result.error}[/red]")
+        stats["errors"] = stats.get("errors", 0) + 1
+        return
+
+    label = result.label
+    stats[label] = stats.get(label, 0) + 1
+    if not dry_run:
+        label_groups.setdefault(label, []).append(result.email.id)
+    if not (verbose or label in ("classifications/respond", "classifications/urgent")):
+        return
+
+    color = LABEL_COLORS.get(label, "white")
+    short_label = label.replace("classifications/", "")
+    console.print(f"[{color}]●[/{color}] [{color}]{short_label}[/{color}] [dim]{sender_preview}[/dim]")
+    console.print(f"  {subject_preview}")
+
+
+def _apply_label_groups(gmail: GmailConnector, label_groups: dict[str, list[str]]) -> None:
+    for label, email_ids in label_groups.items():
+        for batch in _chunked(email_ids, MAX_GMAIL_BATCH_SIZE):
+            gmail.add_labels_bulk(batch, [label])
+
+
+async def _show_countdown(interval: int) -> None:
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[dim]Next check in {task.fields[remaining]}s...[/dim]"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("waiting", total=interval, remaining=interval)
+        for i in range(interval):
+            await asyncio.sleep(1)
+            progress.update(task, advance=1, remaining=interval - i - 1)
+
+
+async def _run_watch_iteration(
+    gmail: GmailConnector,
+    interval: int,
+    dry_run: bool,
+    verbose: bool,
+    concurrency: int,
+) -> None:
+    stats = await process_emails(
+        gmail,
+        dry_run=dry_run,
+        verbose=verbose,
+        concurrency=concurrency,
+    )
+    if sum(stats.values()) > 0:
+        console.print()
+    await _show_countdown(interval)
+
+
 async def process_emails(
     gmail: GmailConnector,
     limit: Optional[int] = None,
@@ -146,9 +245,8 @@ async def process_emails(
     """
     stats: dict[str, int] = {}
     emails_to_process: list[Email] = []
-    emails_to_process_meta: list[Email] = []
-    skipped = 0
     scanned = 0
+    skipped = 0
     
     # Phase 1: Scan for unclassified emails
     console.print(Panel.fit("📬 [bold]mailAlfred[/bold] - Email Classification", style="blue"))
@@ -167,26 +265,13 @@ async def process_emails(
             total=scan_limit if scan_limit else None,
         )
         
-        for email in gmail.iter_messages(
-            use_seen_cache=True,
-            message_format="metadata",
-            metadata_headers=METADATA_HEADERS,
-        ):
-            scanned += 1
-            progress.update(scan_task, completed=scanned, description=f"[cyan]Scanning... ({len(emails_to_process_meta)} to classify, {skipped} done)")
-            
-            if is_already_classified(email, gmail):
-                skipped += 1
-                continue
-            
-            emails_to_process_meta.append(email)
-            
-            if limit and len(emails_to_process_meta) >= limit:
-                break
-            
-            if scan_limit and scanned >= scan_limit:
-                break
-        
+        emails_to_process_meta, scanned, skipped = _scan_unclassified_emails(
+            gmail=gmail,
+            progress=progress,
+            task_id=scan_task,
+            limit=limit,
+            scan_limit=scan_limit,
+        )
         progress.update(scan_task, completed=scanned, description=f"[green]✓ Scan complete")
     
     if not emails_to_process_meta:
@@ -242,31 +327,9 @@ async def process_emails(
     label_groups: dict[str, list[str]] = {}
 
     for result in results:
-        subject_preview = result.email.subject[:60] + "..." if len(result.email.subject) > 60 else result.email.subject
-        sender_preview = result.email.sender[:30] + "..." if len(result.email.sender) > 30 else result.email.sender
-        
-        if result.error:
-            console.print(f"[red]✗[/red] [dim]{sender_preview}[/dim]")
-            console.print(f"  {subject_preview}")
-            console.print(f"  [red]Error: {result.error}[/red]")
-            stats["errors"] = stats.get("errors", 0) + 1
-        else:
-            label = result.label
-            stats[label] = stats.get(label, 0) + 1
-            color = LABEL_COLORS.get(label, "white")
-            short_label = label.replace("classifications/", "")
-            
-            if not dry_run:
-                label_groups.setdefault(label, []).append(result.email.id)
-            
-            if verbose or label in ("classifications/respond", "classifications/urgent"):
-                console.print(f"[{color}]●[/{color}] [{color}]{short_label}[/{color}] [dim]{sender_preview}[/dim]")
-                console.print(f"  {subject_preview}")
-
+        _record_classification_result(result, dry_run, verbose, stats, label_groups)
     if not dry_run:
-        for label, email_ids in label_groups.items():
-            for batch in _chunked(email_ids, MAX_GMAIL_BATCH_SIZE):
-                gmail.add_labels_bulk(batch, [label])
+        _apply_label_groups(gmail, label_groups)
     
     # Print summary
     print_summary(stats, scanned, skipped, dry_run)
@@ -290,32 +353,49 @@ async def watch_mode(
     console.print()
     
     with GmailConnector() as gmail:
-        while True:
-            try:
-                stats = await process_emails(
-                    gmail,
-                    dry_run=dry_run,
-                    verbose=verbose,
-                    concurrency=concurrency,
-                )
-                if sum(stats.values()) > 0:
-                    console.print()
-                
-                # Show countdown
-                with Progress(
-                    SpinnerColumn(),
-                    TextColumn("[dim]Next check in {task.fields[remaining]}s...[/dim]"),
-                    console=console,
-                    transient=True,
-                ) as progress:
-                    task = progress.add_task("waiting", total=interval, remaining=interval)
-                    for i in range(interval):
-                        await asyncio.sleep(1)
-                        progress.update(task, advance=1, remaining=interval - i - 1)
-                        
-            except KeyboardInterrupt:
-                console.print("\n[yellow]👋 Stopping watch mode.[/yellow]")
-                break
+        await _watch_loop(gmail, interval, dry_run, verbose, concurrency)
+
+
+async def _watch_loop(
+    gmail: GmailConnector,
+    interval: int,
+    dry_run: bool,
+    verbose: bool,
+    concurrency: int,
+) -> None:
+    while True:
+        try:
+            await _run_watch_iteration(
+                gmail=gmail,
+                interval=interval,
+                dry_run=dry_run,
+                verbose=verbose,
+                concurrency=concurrency,
+            )
+        except KeyboardInterrupt:
+            console.print("\n[yellow]👋 Stopping watch mode.[/yellow]")
+            break
+
+
+def _run_cli(args) -> None:
+    if args.watch:
+        asyncio.run(watch_mode(
+            interval=args.interval,
+            dry_run=args.dry_run,
+            verbose=args.verbose,
+            concurrency=args.concurrency,
+        ))
+        return
+
+    with GmailConnector() as gmail:
+        asyncio.run(process_emails(
+            gmail=gmail,
+            limit=args.limit,
+            scan_limit=args.scan_limit,
+            dry_run=args.dry_run,
+            verbose=args.verbose,
+            concurrency=args.concurrency,
+        ))
 
 
 def main():
@@ -366,23 +446,7 @@ def main():
     args = parser.parse_args()
     
     try:
-        if args.watch:
-            asyncio.run(watch_mode(
-                interval=args.interval,
-                dry_run=args.dry_run,
-                verbose=args.verbose,
-                concurrency=args.concurrency,
-            ))
-        else:
-            with GmailConnector() as gmail:
-                asyncio.run(process_emails(
-                    gmail=gmail,
-                    limit=args.limit,
-                    scan_limit=args.scan_limit,
-                    dry_run=args.dry_run,
-                    verbose=args.verbose,
-                    concurrency=args.concurrency,
-                ))
+        _run_cli(args)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
 

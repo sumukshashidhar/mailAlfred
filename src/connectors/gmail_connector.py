@@ -12,14 +12,16 @@ Usage:
 
     with GmailConnector() as gmail:
         for email in gmail:
-            print(email.subject)
+            logger.info(email.subject)
             gmail.classify_email(email.id, "classifications/bulk_content")
 """
 
 import base64
 import os
 import webbrowser
+from contextlib import suppress
 from email.utils import parsedate_to_datetime
+from itertools import islice
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -29,6 +31,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from loguru import logger
 
 from src.models.email import Email
 
@@ -105,31 +108,40 @@ class GmailConnector:
 
     def _authenticate(self):
         """Authenticate with Gmail API using OAuth2."""
-        creds = None
-        
-        if os.path.exists(self._token_path):
-            creds = Credentials.from_authorized_user_file(self._token_path, SCOPES)
-        
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
-                if not os.path.exists(self._credentials_path):
-                    raise FileNotFoundError(
-                        f"OAuth credentials not found: {self._credentials_path}\n"
-                        "Download from Google Cloud Console → APIs & Services → Credentials"
-                    )
-                flow = InstalledAppFlow.from_client_secrets_file(self._credentials_path, SCOPES)
-                try:
-                    creds = flow.run_local_server(port=0)
-                except webbrowser.Error:
-                    print("No runnable browser detected; falling back to manual auth flow.")
-                    creds = flow.run_local_server(port=0, open_browser=False)
-            
-            with open(self._token_path, "w") as f:
-                f.write(creds.to_json())
-        
+        creds = self._load_cached_credentials()
+        if creds and creds.valid:
+            return build("gmail", "v1", credentials=creds)
+        creds = self._refresh_or_login(creds)
+        self._save_token(creds)
         return build("gmail", "v1", credentials=creds)
+
+    def _load_cached_credentials(self) -> Optional[Credentials]:
+        if not os.path.exists(self._token_path):
+            return None
+        return Credentials.from_authorized_user_file(self._token_path, SCOPES)
+
+    def _refresh_or_login(self, creds: Optional[Credentials]) -> Credentials:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            return creds
+        return self._run_oauth_flow()
+
+    def _run_oauth_flow(self) -> Credentials:
+        if not os.path.exists(self._credentials_path):
+            raise FileNotFoundError(
+                f"OAuth credentials not found: {self._credentials_path}\n"
+                "Download from Google Cloud Console → APIs & Services → Credentials"
+            )
+        flow = InstalledAppFlow.from_client_secrets_file(self._credentials_path, SCOPES)
+        try:
+            return flow.run_local_server(port=0)
+        except webbrowser.Error:
+            logger.info("No runnable browser detected; falling back to manual auth flow.")
+            return flow.run_local_server(port=0, open_browser=False)
+
+    def _save_token(self, creds: Credentials) -> None:
+        with open(self._token_path, "w") as f:
+            f.write(creds.to_json())
 
     # -------------------------------------------------------------------------
     # Email Iteration
@@ -397,37 +409,35 @@ class _EmailIterator:
     @staticmethod
     def _extract_body(payload: dict) -> tuple[str, str]:
         """Extract plain and HTML body from message payload."""
-        plain, html = "", ""
-        
-        def decode(data: str) -> str:
-            try:
-                return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
-            except Exception:
-                return ""
-        
-        def extract(parts: list[dict]) -> None:
-            nonlocal plain, html
-            for part in parts:
-                mime = part.get("mimeType", "")
-                data = part.get("body", {}).get("data", "")
-                if mime == "text/plain" and not plain:
-                    plain = decode(data)
-                elif mime == "text/html" and not html:
-                    html = decode(data)
-                elif "parts" in part:
-                    extract(part["parts"])
-        
         if "parts" in payload:
-            extract(payload["parts"])
-        else:
-            data = payload.get("body", {}).get("data", "")
-            mime = payload.get("mimeType", "")
-            decoded = decode(data)
-            if mime == "text/plain":
-                plain = decoded
-            elif mime == "text/html":
-                html = decoded
-        
+            return _EmailIterator._extract_body_from_parts(payload["parts"])
+        return _EmailIterator._extract_single_body(payload)
+
+    @staticmethod
+    def _decode_body_data(data: str) -> str:
+        with suppress(Exception):
+            return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+        return ""
+
+    @staticmethod
+    def _extract_single_body(payload: dict) -> tuple[str, str]:
+        decoded = _EmailIterator._decode_body_data(payload.get("body", {}).get("data", ""))
+        mime = payload.get("mimeType", "")
+        plain = decoded if mime == "text/plain" else ""
+        html = decoded if mime == "text/html" else ""
+        return plain, html
+
+    @staticmethod
+    def _extract_body_from_parts(parts: list[dict]) -> tuple[str, str]:
+        plain, html = "", ""
+        queue = list(parts)
+        while queue and (not plain or not html):
+            part = queue.pop(0)
+            mime = part.get("mimeType", "")
+            data = part.get("body", {}).get("data", "")
+            plain = plain or (_EmailIterator._decode_body_data(data) if mime == "text/plain" else "")
+            html = html or (_EmailIterator._decode_body_data(data) if mime == "text/html" else "")
+            queue.extend(part.get("parts", []))
         return plain, html
 
 
@@ -444,13 +454,23 @@ def fetch_new_emails(
     limit: Optional[int] = None,
 ) -> list[Email]:
     """Fetch new emails as a list (convenience wrapper)."""
-    emails = []
     with GmailConnector(credentials_path, token_path, cache_dir, label_ids, query) as gmail:
-        for i, email in enumerate(gmail):
-            emails.append(email)
-            if limit and i + 1 >= limit:
-                break
-    return emails
+        return list(islice(gmail, limit)) if limit else list(gmail)
+
+
+def _print_demo_email(index: int, email: Email) -> None:
+    logger.info(f"[{index}] {email.sender[:40]}")
+    logger.info(f"    Subject: {email.subject[:60]}")
+    logger.info(f"    Date: {email.date}")
+
+
+def _run_demo() -> None:
+    logger.info("Fetching new emails from Gmail...")
+    with GmailConnector() as gmail:
+        for i, email in enumerate(islice(gmail, 5), start=1):
+            _print_demo_email(i, email)
+        logger.info("... (stopping after 5 emails)")
+        logger.info(f"Seen cache size: {gmail.get_seen_count()}")
 
 
 # -----------------------------------------------------------------------------
@@ -458,16 +478,4 @@ def fetch_new_emails(
 # -----------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    print("Fetching new emails from Gmail...\n")
-    
-    with GmailConnector() as gmail:
-        for i, email in enumerate(gmail):
-            print(f"[{i+1}] {email.sender[:40]}")
-            print(f"    Subject: {email.subject[:60]}")
-            print(f"    Date: {email.date}")
-            print()
-            if i >= 4:
-                print("... (stopping after 5 emails)")
-                break
-        
-        print(f"\nSeen cache size: {gmail.get_seen_count()}")
+    _run_demo()

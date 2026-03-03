@@ -1,0 +1,17 @@
+From: {{ email.sender }}
+To: {{ email.to }}
+CC: {{ email.cc }}
+Reply-To: {{ email.reply_to }}
+Subject: {{ email.subject }}
+Sent timestamp (header): {{ email.sent_timestamp }}
+Received timestamp (Gmail internalDate UTC): {{ email.received_timestamp }}
+Search timestamp (gog): {{ email.search_date }}
+Thread ID: {{ email.thread_id }}
+Message ID (header): {{ email.message_id_header }}
+Message ID (gmail): {{ email.message_id }}
+Message count: {{ email.message_count }}
+Current labels: {{ email.current_labels }}
+Current datetime: {{ email.current_datetime }}
+
+Email content:
+{{ email.body }}
