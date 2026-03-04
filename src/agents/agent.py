@@ -8,6 +8,7 @@ from agents import Agent, ModelSettings, RunContextWrapper, function_tool
 from jinja2 import Environment, FileSystemLoader
 
 from src.agents.context import PROMPTS_DIR, PipelineContext
+from src.cache.email_cache import EmailCache
 from src.models import Email
 
 
@@ -74,8 +75,13 @@ async def get_email_thread(
         return "No emails found in this thread."
     lines = []
     for e in thread:
+        lines.append(f"--- [{e.date}] From: {e.sender} | To: {', '.join(e.recipients)}")
+        if e.cc:
+            lines.append(f"    CC: {', '.join(e.cc)}")
+        lines.append(f"    Subject: {e.subject}")
         body_preview = (e.body_plain or "")[:300]
-        lines.append(f"--- [{e.date}] {e.sender}: {e.subject}\n{body_preview}\n")
+        lines.append(body_preview)
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -170,6 +176,7 @@ async def update_event(
         event_id: The Google Calendar event ID.
         notes: Additional notes or details to append to the event description.
     """
+    # Try Assistant calendar first, fall back to primary
     current = await ctx.context.calendar.get_event(event_id)
     existing_desc = current.get("description", "")
     new_desc = f"{existing_desc}\n\n---\n{notes}" if existing_desc else notes
@@ -177,7 +184,7 @@ async def update_event(
     result = await ctx.context.calendar.update_event(
         event_id, {"description": new_desc}
     )
-    return f"Updated event '{result.get('summary', event_id)}' with new notes."
+    return f"Updated event '{result.get('summary', event_id)}'."
 
 
 @function_tool
@@ -260,13 +267,6 @@ def build_triage_agent(
     instructions = template.render(
         todoist_context=todoist_context,
         calendar_context=calendar_context,
-        # Per-email fields are placeholders; actual content comes via Runner input.
-        sender="(see Current Email below)",
-        recipients="(see Current Email below)",
-        date="(see Current Email below)",
-        subject="(see Current Email below)",
-        body="(see Current Email below)",
-        thread_context="",
     )
 
     return Agent(
@@ -278,15 +278,38 @@ def build_triage_agent(
     )
 
 
-def render_email_input(email: Email) -> str:
-    """Format an email as input text for the triage agent."""
+def _format_email(email: Email) -> str:
+    """Format a single email with full headers."""
     parts = [
         f"From: {email.sender}",
         f"To: {', '.join(email.recipients)}",
-        f"Date: {email.date}",
-        f"Subject: {email.subject}",
-        f"Thread ID: {email.thread_id}",
-        "",
-        email.body_plain or email.snippet or "(no body)",
     ]
+    if email.cc:
+        parts.append(f"CC: {', '.join(email.cc)}")
+    if email.bcc:
+        parts.append(f"BCC: {', '.join(email.bcc)}")
+    parts.append(f"Date: {email.date}")
+    parts.append(f"Subject: {email.subject}")
+    parts.append("")
+    parts.append(email.body_plain or email.snippet or "(no body)")
+    return "\n".join(parts)
+
+
+def render_email_input(email: Email, cache: "EmailCache") -> str:
+    """Format the current email with its full thread for the triage agent."""
+    thread = cache.get_email_thread(email.thread_id)
+
+    # If there's only one message (or cache miss), just show the email
+    if len(thread) <= 1:
+        return _format_email(email)
+
+    parts = [f"Thread ID: {email.thread_id}", ""]
+
+    for i, msg in enumerate(thread):
+        is_current = msg.id == email.id
+        marker = " [THIS EMAIL]" if is_current else ""
+        parts.append(f"--- Message {i + 1}{marker} ---")
+        parts.append(_format_email(msg))
+        parts.append("")
+
     return "\n".join(parts)

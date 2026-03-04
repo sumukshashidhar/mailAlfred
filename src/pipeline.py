@@ -81,7 +81,7 @@ async def run_pipeline(limit: int = 5, max_concurrent: int = 3) -> list[dict]:
 
                 result = await Runner.run(
                     agent,
-                    input=render_email_input(email),
+                    input=render_email_input(email, cache),
                     context=context,
                 )
 

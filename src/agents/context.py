@@ -112,7 +112,9 @@ async def fetch_calendar_context(
         status = ev.get("status", "confirmed")
         description = ev.get("description", "")
 
-        lines.append(f"- **{summary}** | {start} - {end} | id: `{event_id}` | {status}")
+        cal_id = ev.get("_calendarId", "")
+        cal_label = f" [{cal_id}]" if cal_id else ""
+        lines.append(f"- **{summary}** | {start} - {end} | id: `{event_id}` | {status}{cal_label}")
         if description:
             short = description[:200] + ("..." if len(description) > 200 else "")
             lines.append(f"  > {short}")

@@ -11,10 +11,14 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
 
+WRITE_CALENDAR_ID = "Assistant"
+
+
 class Calendar:
     """Async-friendly Google Calendar connector.
 
-    Reuses the shared token.json (written by Gmail connector with all scopes).
+    Reads from all calendars; writes only to the "Assistant" calendar.
+    Never invites attendees.
     """
 
     def __init__(
@@ -23,6 +27,7 @@ class Calendar:
     ) -> None:
         self._token_path = token_path
         self._service = None
+        self._calendar_ids: list[str] | None = None
 
     # ------------------------------------------------------------------
     # Auth
@@ -51,14 +56,33 @@ class Calendar:
     # Sync helpers
     # ------------------------------------------------------------------
 
+    def _get_all_calendar_ids(self) -> list[str]:
+        """Fetch all calendar IDs the user has access to."""
+        if self._calendar_ids is not None:
+            return self._calendar_ids
+
+        service = self._get_service()
+        calendars: list[str] = []
+        page_token = None
+
+        while True:
+            response = service.calendarList().list(pageToken=page_token).execute()
+            for entry in response.get("items", []):
+                calendars.append(entry["id"])
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+
+        self._calendar_ids = calendars
+        return calendars
+
     def _list_events_sync(
         self,
         time_min: datetime | None = None,
         time_max: datetime | None = None,
         max_results: int = 250,
-        calendar_id: str = "primary",
     ) -> list[dict]:
-        """List events in a time range."""
+        """List events across all calendars in a time range."""
         service = self._get_service()
 
         now = datetime.now(timezone.utc)
@@ -67,47 +91,63 @@ class Calendar:
         if time_max is None:
             time_max = now + timedelta(weeks=1)
 
-        events: list[dict] = []
-        page_token = None
+        all_events: list[dict] = []
 
-        while True:
-            kwargs: dict = {
-                "calendarId": calendar_id,
-                "timeMin": time_min.isoformat(),
-                "timeMax": time_max.isoformat(),
-                "maxResults": max_results,
-                "singleEvents": True,
-                "orderBy": "startTime",
-            }
-            if page_token:
-                kwargs["pageToken"] = page_token
+        for cal_id in self._get_all_calendar_ids():
+            page_token = None
+            while True:
+                kwargs: dict = {
+                    "calendarId": cal_id,
+                    "timeMin": time_min.isoformat(),
+                    "timeMax": time_max.isoformat(),
+                    "maxResults": max_results,
+                    "singleEvents": True,
+                    "orderBy": "startTime",
+                }
+                if page_token:
+                    kwargs["pageToken"] = page_token
 
-            response = service.events().list(**kwargs).execute()
-            events.extend(response.get("items", []))
+                response = service.events().list(**kwargs).execute()
+                for item in response.get("items", []):
+                    item["_calendarId"] = cal_id
+                    all_events.append(item)
 
-            page_token = response.get("nextPageToken")
-            if not page_token:
-                break
+                page_token = response.get("nextPageToken")
+                if not page_token:
+                    break
 
-        return events
+        # Sort all events by start time across calendars
+        def _sort_key(ev: dict) -> str:
+            s = ev.get("start", {})
+            return s.get("dateTime", s.get("date", ""))
 
-    def _get_event_sync(self, event_id: str, calendar_id: str = "primary") -> dict:
+        all_events.sort(key=_sort_key)
+        return all_events
+
+    def _get_event_sync(self, event_id: str, calendar_id: str | None = None) -> dict:
         """Get a single event by ID."""
         service = self._get_service()
         return service.events().get(
-            calendarId=calendar_id, eventId=event_id
+            calendarId=calendar_id or WRITE_CALENDAR_ID, eventId=event_id
         ).execute()
 
     def _update_event_sync(
         self,
         event_id: str,
         body: dict,
-        calendar_id: str = "primary",
+        calendar_id: str | None = None,
     ) -> dict:
-        """Patch an event with the given fields."""
+        """Patch an event with the given fields.
+
+        Always strips attendees to prevent sending invitations.
+        """
         service = self._get_service()
+        body.pop("attendees", None)
         return service.events().patch(
-            calendarId=calendar_id, eventId=event_id, body=body
+            calendarId=calendar_id or WRITE_CALENDAR_ID,
+            eventId=event_id,
+            body=body,
+            sendUpdates="none",
         ).execute()
 
     def _create_event_sync(
@@ -116,9 +156,11 @@ class Calendar:
         start: str,
         end: str,
         description: str = "",
-        calendar_id: str = "primary",
     ) -> dict:
-        """Create a new calendar event."""
+        """Create a new event in the Assistant calendar.
+
+        Never includes attendees.
+        """
         service = self._get_service()
         body = {
             "summary": summary,
@@ -127,7 +169,9 @@ class Calendar:
             "end": {"dateTime": end},
         }
         return service.events().insert(
-            calendarId=calendar_id, body=body
+            calendarId=WRITE_CALENDAR_ID,
+            body=body,
+            sendUpdates="none",
         ).execute()
 
     # ------------------------------------------------------------------
@@ -140,18 +184,22 @@ class Calendar:
         time_max: datetime | None = None,
         max_results: int = 250,
     ) -> list[dict]:
-        """List events in a time range, asynchronously."""
+        """List events across all calendars, asynchronously."""
         return await asyncio.to_thread(
             self._list_events_sync, time_min, time_max, max_results
         )
 
-    async def get_event(self, event_id: str) -> dict:
+    async def get_event(self, event_id: str, calendar_id: str | None = None) -> dict:
         """Get a single event by ID, asynchronously."""
-        return await asyncio.to_thread(self._get_event_sync, event_id)
+        return await asyncio.to_thread(self._get_event_sync, event_id, calendar_id)
 
-    async def update_event(self, event_id: str, body: dict) -> dict:
-        """Patch an event, asynchronously."""
-        return await asyncio.to_thread(self._update_event_sync, event_id, body)
+    async def update_event(
+        self, event_id: str, body: dict, calendar_id: str | None = None
+    ) -> dict:
+        """Patch an event (always in Assistant calendar), asynchronously."""
+        return await asyncio.to_thread(
+            self._update_event_sync, event_id, body, calendar_id
+        )
 
     async def create_event(
         self,
@@ -160,7 +208,7 @@ class Calendar:
         end: str,
         description: str = "",
     ) -> dict:
-        """Create a new calendar event, asynchronously."""
+        """Create a new event in the Assistant calendar, asynchronously."""
         return await asyncio.to_thread(
             self._create_event_sync, summary, start, end, description
         )
