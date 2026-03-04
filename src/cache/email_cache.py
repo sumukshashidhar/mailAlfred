@@ -7,7 +7,7 @@ from datetime import datetime
 
 import duckdb
 
-from src.models import Email
+from src.models import Attachment, Email
 
 
 class EmailCache:
@@ -134,6 +134,69 @@ class EmailCache:
         """Return the total number of cached emails."""
         row = self._conn.execute("SELECT COUNT(*) FROM emails").fetchone()
         return row[0]
+
+    def get_email(self, email_id: str) -> Email | None:
+        """Return a single Email by its ID, or None if not found."""
+        result = self._conn.execute(
+            """
+            SELECT id, thread_id, subject, sender,
+                   recipients, cc, bcc, date,
+                   message_id, in_reply_to, "references",
+                   snippet, body_plain, body_html,
+                   labels, attachment_meta
+            FROM emails WHERE id = ?
+            """,
+            [email_id],
+        )
+        columns = [desc[0] for desc in result.description]
+        row = result.fetchone()
+        if row is None:
+            return None
+        return self._row_to_email(row, columns)
+
+    @staticmethod
+    def _row_to_email(row: tuple, columns: list[str]) -> Email:
+        """Convert a DuckDB result row to an Email dataclass.
+
+        Parses attachment_meta JSON back into Attachment objects.
+        """
+        data = dict(zip(columns, row))
+
+        # Parse attachment JSON back into Attachment objects
+        raw_meta = data.pop("attachment_meta", "[]")
+        if isinstance(raw_meta, str):
+            meta_list = json.loads(raw_meta)
+        else:
+            # DuckDB may return it already parsed
+            meta_list = raw_meta if raw_meta else []
+        attachments = [
+            Attachment(
+                filename=m.get("filename", ""),
+                mime_type=m.get("mime_type", ""),
+                size=m.get("size", 0),
+                attachment_id=m.get("attachment_id", ""),
+            )
+            for m in meta_list
+        ]
+
+        return Email(
+            id=data["id"],
+            thread_id=data["thread_id"],
+            subject=data.get("subject", ""),
+            sender=data.get("sender", ""),
+            recipients=list(data.get("recipients") or []),
+            cc=list(data.get("cc") or []),
+            bcc=list(data.get("bcc") or []),
+            date=data.get("date"),
+            message_id=data.get("message_id", ""),
+            in_reply_to=data.get("in_reply_to", ""),
+            references=list(data.get("references") or []),
+            snippet=data.get("snippet", ""),
+            body_plain=data.get("body_plain", ""),
+            body_html=data.get("body_html", ""),
+            labels=list(data.get("labels") or []),
+            attachments=attachments,
+        )
 
     # ------------------------------------------------------------------
     # Sync state

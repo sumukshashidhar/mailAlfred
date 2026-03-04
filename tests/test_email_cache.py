@@ -189,3 +189,120 @@ class TestSyncState:
         with EmailCache(db_path=":memory:") as cache:
             cache.upsert_emails([_make_email(id=f"m{i}") for i in range(3)])
             assert cache.count() == 3
+
+
+class TestGetEmail:
+    """Task 5: get_email read-back tests."""
+
+    def test_get_existing_email(self):
+        """Verify that ALL 17 fields survive the round-trip through DuckDB."""
+        with EmailCache(db_path=":memory:") as cache:
+            dt = datetime(2026, 3, 4, 14, 30, 0, tzinfo=timezone.utc)
+            att1 = Attachment(
+                filename="report.pdf",
+                mime_type="application/pdf",
+                size=2048,
+                attachment_id="att_001",
+                data=b"binary-should-not-persist",
+            )
+            att2 = Attachment(
+                filename="photo.jpg",
+                mime_type="image/jpeg",
+                size=51200,
+                attachment_id="att_002",
+            )
+            original = Email(
+                id="msg_full",
+                thread_id="thread_42",
+                subject="Quarterly Report Q1 2026",
+                sender="bob@example.com",
+                recipients=["alice@example.com", "charlie@example.com"],
+                cc=["manager@example.com"],
+                bcc=["audit@example.com"],
+                date=dt,
+                message_id="<unique-msg-id@example.com>",
+                in_reply_to="<prev-msg-id@example.com>",
+                references=["<first@example.com>", "<second@example.com>"],
+                snippet="Please find attached the quarterly...",
+                body_plain="Dear team,\n\nPlease find attached the quarterly report.",
+                body_html="<html><body><p>Dear team,</p></body></html>",
+                labels=["INBOX", "IMPORTANT", "CATEGORY_UPDATES"],
+                attachments=[att1, att2],
+            )
+
+            cache.upsert_emails([original])
+            retrieved = cache.get_email("msg_full")
+
+            assert retrieved is not None
+            assert isinstance(retrieved, Email)
+
+            # Identifiers
+            assert retrieved.id == "msg_full"
+            assert retrieved.thread_id == "thread_42"
+
+            # Core headers
+            assert retrieved.subject == "Quarterly Report Q1 2026"
+            assert retrieved.sender == "bob@example.com"
+            assert retrieved.recipients == ["alice@example.com", "charlie@example.com"]
+            assert retrieved.cc == ["manager@example.com"]
+            assert retrieved.bcc == ["audit@example.com"]
+            assert retrieved.date == dt
+
+            # Threading headers
+            assert retrieved.message_id == "<unique-msg-id@example.com>"
+            assert retrieved.in_reply_to == "<prev-msg-id@example.com>"
+            assert retrieved.references == ["<first@example.com>", "<second@example.com>"]
+
+            # Body content
+            assert retrieved.snippet == "Please find attached the quarterly..."
+            assert retrieved.body_plain == "Dear team,\n\nPlease find attached the quarterly report."
+            assert retrieved.body_html == "<html><body><p>Dear team,</p></body></html>"
+
+            # Metadata
+            assert retrieved.labels == ["INBOX", "IMPORTANT", "CATEGORY_UPDATES"]
+
+            # Attachments — reconstructed from JSON as Attachment objects
+            assert len(retrieved.attachments) == 2
+            assert isinstance(retrieved.attachments[0], Attachment)
+
+            a1 = retrieved.attachments[0]
+            assert a1.filename == "report.pdf"
+            assert a1.mime_type == "application/pdf"
+            assert a1.size == 2048
+            assert a1.attachment_id == "att_001"
+            assert a1.data == b""  # binary data not stored
+
+            a2 = retrieved.attachments[1]
+            assert a2.filename == "photo.jpg"
+            assert a2.mime_type == "image/jpeg"
+            assert a2.size == 51200
+            assert a2.attachment_id == "att_002"
+
+    def test_get_nonexistent_email_returns_none(self):
+        with EmailCache(db_path=":memory:") as cache:
+            assert cache.get_email("nonexistent") is None
+
+    def test_get_email_with_defaults(self):
+        """Verify an email with all default/empty fields round-trips correctly."""
+        with EmailCache(db_path=":memory:") as cache:
+            minimal = Email(id="minimal", thread_id="t_min")
+            cache.upsert_emails([minimal])
+            retrieved = cache.get_email("minimal")
+
+            assert retrieved is not None
+            assert retrieved.id == "minimal"
+            assert retrieved.thread_id == "t_min"
+            assert retrieved.subject == ""
+            assert retrieved.sender == ""
+            assert retrieved.recipients == []
+            assert retrieved.cc == []
+            assert retrieved.bcc == []
+            assert retrieved.date is None
+            assert retrieved.message_id == ""
+            assert retrieved.in_reply_to == ""
+            assert retrieved.references == []
+            assert retrieved.snippet == ""
+            assert retrieved.body_plain == ""
+            assert retrieved.body_html == ""
+            assert retrieved.labels == []
+            assert retrieved.attachments == []
