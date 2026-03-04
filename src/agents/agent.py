@@ -281,6 +281,7 @@ def build_triage_agent(
         model="gpt-5.2",
         model_settings=ModelSettings(
             reasoning=Reasoning(effort="medium", summary="auto"),
+            metadata={"version": "v1"},
             extra_args={"service_tier": "flex"},
         ),
         tools=ALL_TOOLS,
