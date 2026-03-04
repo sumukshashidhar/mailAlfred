@@ -41,6 +41,7 @@ class EmailCache:
                 body_html       VARCHAR DEFAULT '',
                 labels          VARCHAR[] DEFAULT [],
                 attachment_meta JSON DEFAULT '[]',
+                organized       BOOLEAN DEFAULT FALSE,
                 cached_at       TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -67,7 +68,7 @@ class EmailCache:
 
         self._conn.executemany(
             """
-            INSERT OR REPLACE INTO emails (
+            INSERT INTO emails (
                 id, thread_id, subject, sender,
                 recipients, cc, bcc, date,
                 message_id, in_reply_to, "references",
@@ -80,6 +81,23 @@ class EmailCache:
                 ?, ?, ?,
                 ?, ?, CURRENT_TIMESTAMP
             )
+            ON CONFLICT (id) DO UPDATE SET
+                thread_id       = EXCLUDED.thread_id,
+                subject         = EXCLUDED.subject,
+                sender          = EXCLUDED.sender,
+                recipients      = EXCLUDED.recipients,
+                cc              = EXCLUDED.cc,
+                bcc             = EXCLUDED.bcc,
+                date            = EXCLUDED.date,
+                message_id      = EXCLUDED.message_id,
+                in_reply_to     = EXCLUDED.in_reply_to,
+                "references"    = EXCLUDED."references",
+                snippet         = EXCLUDED.snippet,
+                body_plain      = EXCLUDED.body_plain,
+                body_html       = EXCLUDED.body_html,
+                labels          = EXCLUDED.labels,
+                attachment_meta = EXCLUDED.attachment_meta,
+                cached_at       = EXCLUDED.cached_at
             """,
             [self._email_to_row(e) for e in emails],
         )
@@ -143,7 +161,7 @@ class EmailCache:
                    recipients, cc, bcc, date,
                    message_id, in_reply_to, "references",
                    snippet, body_plain, body_html,
-                   labels, attachment_meta
+                   labels, attachment_meta, organized
             FROM emails WHERE id = ?
             """,
             [email_id],
@@ -201,6 +219,7 @@ class EmailCache:
             body_html=data.get("body_html", ""),
             labels=list(data.get("labels") or []),
             attachments=attachments,
+            organized=bool(data.get("organized", False)),
         )
 
     # ------------------------------------------------------------------
@@ -208,17 +227,26 @@ class EmailCache:
     # ------------------------------------------------------------------
 
     def search(self, query: str, limit: int = 50) -> list[Email]:
-        """Search emails by subject and body (case-insensitive)."""
-        pattern = f"%{query}%"
+        """Search emails by subject and body (case-insensitive).
+
+        Returns empty list for blank queries. LIKE metacharacters (%, _)
+        in the query are treated as literal characters.
+        """
+        if not query or not query.strip():
+            return []
+
+        # Escape LIKE metacharacters so they match literally
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
         result = self._conn.execute(
             """
             SELECT id, thread_id, subject, sender,
                    recipients, cc, bcc, date,
                    message_id, in_reply_to, "references",
                    snippet, body_plain, body_html,
-                   labels, attachment_meta
+                   labels, attachment_meta, organized
             FROM emails
-            WHERE subject ILIKE ? OR body_plain ILIKE ?
+            WHERE subject ILIKE ? ESCAPE '\\' OR body_plain ILIKE ? ESCAPE '\\'
             ORDER BY date DESC NULLS LAST
             LIMIT ?
             """,
@@ -239,7 +267,7 @@ class EmailCache:
         params: list = []
 
         if sender is not None:
-            conditions.append("sender = ?")
+            conditions.append("sender ILIKE ?")
             params.append(sender)
         if date_from is not None:
             conditions.append("date >= ?")
@@ -260,13 +288,44 @@ class EmailCache:
                    recipients, cc, bcc, date,
                    message_id, in_reply_to, "references",
                    snippet, body_plain, body_html,
-                   labels, attachment_meta
+                   labels, attachment_meta, organized
             FROM emails
             WHERE {where}
             ORDER BY date DESC NULLS LAST
             LIMIT ?
             """,
             params,
+        )
+        return self._rows_to_emails(result)
+
+    # ------------------------------------------------------------------
+    # Organized flag
+    # ------------------------------------------------------------------
+
+    def mark_organized(self, email_ids: list[str]) -> None:
+        """Mark one or more emails as organized."""
+        if not email_ids:
+            return
+        self._conn.executemany(
+            "UPDATE emails SET organized = TRUE WHERE id = ?",
+            [(eid,) for eid in email_ids],
+        )
+
+    def get_unorganized(self, limit: int = 50) -> list[Email]:
+        """Return emails that have not been organized yet, newest first."""
+        result = self._conn.execute(
+            """
+            SELECT id, thread_id, subject, sender,
+                   recipients, cc, bcc, date,
+                   message_id, in_reply_to, "references",
+                   snippet, body_plain, body_html,
+                   labels, attachment_meta, organized
+            FROM emails
+            WHERE organized = FALSE
+            ORDER BY date DESC NULLS LAST
+            LIMIT ?
+            """,
+            [limit],
         )
         return self._rows_to_emails(result)
 

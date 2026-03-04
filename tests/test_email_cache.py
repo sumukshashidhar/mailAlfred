@@ -67,6 +67,7 @@ class TestSchemaCreation:
             "body_html",
             "labels",
             "attachment_meta",
+            "organized",
             "cached_at",
         ]
         assert columns == expected
@@ -374,6 +375,35 @@ class TestSearch:
             results = cache.search("meeting")
             assert len(results) == 2
 
+    def test_empty_query_returns_empty(self):
+        """An empty or whitespace-only query should not match everything."""
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([_make_email(id="m1", subject="Hello")])
+            assert cache.search("") == []
+            assert cache.search("   ") == []
+
+    def test_percent_wildcard_treated_literally(self):
+        """LIKE metacharacter % in the query should match the literal character."""
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="m1", subject="100% complete"),
+                _make_email(id="m2", subject="100 complete"),
+            ])
+            results = cache.search("100%")
+            assert len(results) == 1
+            assert results[0].id == "m1"
+
+    def test_underscore_wildcard_treated_literally(self):
+        """LIKE metacharacter _ in the query should match the literal character."""
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="m1", subject="in_reply_to header"),
+                _make_email(id="m2", subject="inXreplyXto header"),
+            ])
+            results = cache.search("in_reply_to")
+            assert len(results) == 1
+            assert results[0].id == "m1"
+
 
 class TestFilterEmails:
     """Filter by sender, date range, label — all combinable."""
@@ -464,6 +494,81 @@ class TestFilterEmails:
             results = cache.filter_emails(sender="a@co.com")
             assert results[0].id == "new"
             assert results[1].id == "old"
+
+    def test_filter_sender_case_insensitive(self):
+        """Sender filtering should be case-insensitive."""
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="m1", sender="Alice@Example.COM"),
+                _make_email(id="m2", sender="bob@other.com"),
+            ])
+            results = cache.filter_emails(sender="alice@example.com")
+            assert len(results) == 1
+            assert results[0].id == "m1"
+
+
+class TestOrganizedFlag:
+    """Organized boolean flag on emails."""
+
+    def test_emails_default_to_unorganized(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([_make_email(id="m1")])
+            email = cache.get_email("m1")
+            assert email.organized is False
+
+    def test_mark_organized(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="m1"),
+                _make_email(id="m2"),
+            ])
+            cache.mark_organized(["m1"])
+            assert cache.get_email("m1").organized is True
+            assert cache.get_email("m2").organized is False
+
+    def test_mark_organized_batch(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([_make_email(id=f"m{i}") for i in range(5)])
+            cache.mark_organized(["m0", "m2", "m4"])
+            for i in range(5):
+                email = cache.get_email(f"m{i}")
+                assert email.organized == (i % 2 == 0)
+
+    def test_mark_organized_empty_list_is_noop(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([_make_email(id="m1")])
+            cache.mark_organized([])
+            assert cache.get_email("m1").organized is False
+
+    def test_get_unorganized(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="m1", date=datetime(2026, 3, 1, tzinfo=timezone.utc)),
+                _make_email(id="m2", date=datetime(2026, 3, 2, tzinfo=timezone.utc)),
+                _make_email(id="m3", date=datetime(2026, 3, 3, tzinfo=timezone.utc)),
+            ])
+            cache.mark_organized(["m2"])
+            unorg = cache.get_unorganized()
+            assert len(unorg) == 2
+            assert [e.id for e in unorg] == ["m3", "m1"]
+
+    def test_get_unorganized_respects_limit(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([_make_email(id=f"m{i}") for i in range(10)])
+            assert len(cache.get_unorganized(limit=3)) == 3
+
+    def test_upsert_preserves_organized_flag(self):
+        """Re-syncing an email should NOT reset organized back to False."""
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([_make_email(id="m1", subject="Original")])
+            cache.mark_organized(["m1"])
+            assert cache.get_email("m1").organized is True
+
+            # Re-sync same email with updated subject
+            cache.upsert_emails([_make_email(id="m1", subject="Updated")])
+            email = cache.get_email("m1")
+            assert email.subject == "Updated"
+            assert email.organized is True  # preserved!
 
 
 class TestFilePersistence:
