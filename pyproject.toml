@@ -7,8 +7,6 @@ requires-python = ">=3.12"
 dependencies = [
     "asyncio>=4.0.0",
     "beautifulsoup4>=4.13.0",
-    "chromadb>=1.5.2",
-    "duckdb>=1.4.4",
     "google-api-python-client>=2.150.0",
     "google-auth-httplib2>=0.2.0",
     "google-auth-oauthlib>=1.2.0",

@@ -43,5 +43,3 @@ class Email:
     labels: list[str] = field(default_factory=list)
     attachments: list[Attachment] = field(default_factory=list)
 
-    # Cache state
-    organized: bool = False

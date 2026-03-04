@@ -336,6 +336,22 @@ class Gmail:
         return base64.urlsafe_b64decode(data)
 
     # ------------------------------------------------------------------
+    # Thread fetch (sync)
+    # ------------------------------------------------------------------
+
+    def _get_thread_sync(self, thread_id: str) -> list[Email]:
+        """Fetch all messages in a thread, ordered chronologically."""
+        service = self._get_service()
+        response = (
+            service.users()
+            .threads()
+            .get(userId="me", id=thread_id, format="full")
+            .execute()
+        )
+        messages = response.get("messages", [])
+        return [self._parse_message(m) for m in messages]
+
+    # ------------------------------------------------------------------
     # Label operations (sync)
     # ------------------------------------------------------------------
 
@@ -388,6 +404,10 @@ class Gmail:
     async def get_unread_emails(self, max_results: int = 10) -> list[Email]:
         """Fetch unread emails asynchronously."""
         return await asyncio.to_thread(self._fetch_messages_sync, max_results)
+
+    async def get_thread(self, thread_id: str) -> list[Email]:
+        """Fetch all messages in a thread, asynchronously."""
+        return await asyncio.to_thread(self._get_thread_sync, thread_id)
 
     async def get_email(self, email_id: str) -> Email:
         """Fetch a single email by ID asynchronously."""

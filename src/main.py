@@ -11,7 +11,7 @@ from src.pipeline import run_pipeline
 
 async def main() -> None:
     logger.info("Starting mailAlfred pipeline...")
-    results = await run_pipeline(limit=50, max_concurrent=3)
+    results = await run_pipeline(limit=50, max_concurrent=1)
 
     for r in results:
         status = r["status"]

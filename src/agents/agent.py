@@ -9,7 +9,6 @@ from jinja2 import Environment, FileSystemLoader
 from openai.types.shared import Reasoning
 
 from src.agents.context import PROMPTS_DIR, PipelineContext
-from src.cache.email_cache import EmailCache
 from src.models import Email
 
 
@@ -38,7 +37,7 @@ async def apply_label(
 
 
 # ------------------------------------------------------------------
-# Context lookup tools
+# Context lookup tools (Gmail-backed)
 # ------------------------------------------------------------------
 
 
@@ -47,12 +46,12 @@ async def search_emails(
     ctx: RunContextWrapper[PipelineContext],
     query: str,
 ) -> str:
-    """Search past emails by keyword for additional context.
+    """Search past emails by keyword via Gmail search.
 
     Args:
-        query: Search term to look for in subjects and bodies.
+        query: Gmail search query (e.g. 'from:alice subject:budget').
     """
-    results = ctx.context.cache.search_emails(query, limit=10)
+    results = await ctx.context.gmail.fetch_all_emails(query=query, max_emails=10)
     if not results:
         return "No matching emails found."
     lines = []
@@ -66,12 +65,12 @@ async def get_email_thread(
     ctx: RunContextWrapper[PipelineContext],
     thread_id: str,
 ) -> str:
-    """Get all emails in a conversation thread for context.
+    """Get all emails in a conversation thread via Gmail.
 
     Args:
         thread_id: The Gmail thread ID.
     """
-    thread = ctx.context.cache.get_email_thread(thread_id)
+    thread = await ctx.context.gmail.get_thread(thread_id)
     if not thread:
         return "No emails found in this thread."
     lines = []
@@ -91,18 +90,19 @@ async def get_emails_from_sender(
     ctx: RunContextWrapper[PipelineContext],
     sender: str,
 ) -> str:
-    """Get recent emails from a sender to understand patterns.
+    """Get recent emails from a sender via Gmail search.
 
     Args:
         sender: Sender email address or name to search for.
     """
-    results = ctx.context.cache.get_emails_from_sender(sender, limit=10)
+    results = await ctx.context.gmail.fetch_all_emails(
+        query=f"from:{sender}", max_emails=10
+    )
     if not results:
         return "No emails found from this sender."
     lines = []
     for e in results:
-        labels = ", ".join(e.labels) if e.labels else "none"
-        lines.append(f"- [{e.date}] {e.subject} (labels: {labels})")
+        lines.append(f"- [{e.date}] {e.subject}")
     return "\n".join(lines)
 
 
@@ -182,7 +182,6 @@ async def update_event(
         event_id: The Google Calendar event ID.
         notes: Additional notes or details to append to the event description.
     """
-    # Try Assistant calendar first, fall back to primary
     current = await ctx.context.calendar.get_event(event_id)
     existing_desc = current.get("description", "")
     new_desc = f"{existing_desc}\n\n---\n{notes}" if existing_desc else notes
@@ -278,10 +277,10 @@ def build_triage_agent(
     return Agent(
         name="Triage Agent",
         instructions=instructions,
-        model="gpt-5.2",
+        model="gpt-5-mini",
         model_settings=ModelSettings(
             reasoning=Reasoning(effort="medium", summary="auto"),
-            metadata={"version": "v1"},
+            metadata={"version": "v2"},
             extra_args={"service_tier": "flex"},
         ),
         tools=ALL_TOOLS,
@@ -305,11 +304,9 @@ def _format_email(email: Email) -> str:
     return "\n".join(parts)
 
 
-def render_email_input(email: Email, cache: "EmailCache") -> str:
+def render_email_input(email: Email, thread: list[Email]) -> str:
     """Format the current email with its full thread for the triage agent."""
-    thread = cache.get_email_thread(email.thread_id)
-
-    # If there's only one message (or cache miss), just show the email
+    # If there's only one message, just show the email
     if len(thread) <= 1:
         return _format_email(email)
 

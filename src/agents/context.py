@@ -1,4 +1,4 @@
-"""Pre-fetch context and unified pipeline context for all agents."""
+"""Pre-fetch context and unified pipeline context."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.cache.email_cache import EmailCache
 from src.connectors.calendar import Calendar
 from src.connectors.gmail import Gmail
 from src.connectors.todoist import Todoist
@@ -20,14 +19,9 @@ PROMPTS_DIR = str(Path(__file__).parent.parent.parent / "prompts")
 
 @dataclass
 class PipelineContext:
-    """Single unified context passed through the entire Runner.run() call.
-
-    The SDK reuses the same RunContextWrapper across all agents in a run
-    (including after handoffs), so every agent's tools must share one type.
-    """
+    """Shared context passed through Runner.run() to all tools."""
 
     gmail: Gmail
-    cache: EmailCache
     label_resolver: LabelResolver
     current_email: Email
     calendar: Calendar
@@ -96,10 +90,7 @@ async def fetch_calendar_context(
     weeks_back: int = 1,
     weeks_forward: int = 2,
 ) -> str:
-    """Fetch recent and upcoming calendar events; return as formatted markdown.
-
-    Strips IDs, HTML, and status to keep context clean for the agent.
-    """
+    """Fetch recent and upcoming calendar events; return as formatted markdown."""
     now = datetime.now(timezone.utc)
     time_min = now - timedelta(weeks=weeks_back)
     time_max = now + timedelta(weeks=weeks_forward)
