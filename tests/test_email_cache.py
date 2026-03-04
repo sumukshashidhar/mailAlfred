@@ -306,3 +306,215 @@ class TestGetEmail:
             assert retrieved.body_html == ""
             assert retrieved.labels == []
             assert retrieved.attachments == []
+
+
+class TestSearch:
+    """Full-text search across subject and body."""
+
+    def test_matches_subject(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="m1", subject="Quarterly budget report"),
+                _make_email(id="m2", subject="Lunch plans for Friday"),
+                _make_email(id="m3", subject="Annual budget review"),
+            ])
+            results = cache.search("budget")
+            assert len(results) == 2
+            assert {r.id for r in results} == {"m1", "m3"}
+
+    def test_matches_body(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="m1", body_plain="Please review the attached invoice"),
+                _make_email(id="m2", body_plain="See you at the meeting"),
+            ])
+            results = cache.search("invoice")
+            assert len(results) == 1
+            assert results[0].id == "m1"
+
+    def test_case_insensitive(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="m1", subject="URGENT: Server Down"),
+            ])
+            assert len(cache.search("urgent")) == 1
+            assert len(cache.search("server down")) == 1
+
+    def test_no_results_returns_empty(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([_make_email(id="m1", subject="Hello")])
+            assert cache.search("nonexistent") == []
+
+    def test_respects_limit(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id=f"m{i}", subject=f"Report #{i}") for i in range(20)
+            ])
+            results = cache.search("report", limit=5)
+            assert len(results) == 5
+
+    def test_ordered_by_date_desc(self):
+        """Newest emails should appear first."""
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="old", subject="Report old", date=datetime(2026, 1, 1, tzinfo=timezone.utc)),
+                _make_email(id="new", subject="Report new", date=datetime(2026, 3, 1, tzinfo=timezone.utc)),
+                _make_email(id="mid", subject="Report mid", date=datetime(2026, 2, 1, tzinfo=timezone.utc)),
+            ])
+            results = cache.search("report")
+            assert [r.id for r in results] == ["new", "mid", "old"]
+
+    def test_matches_across_subject_and_body(self):
+        """A query should match if it appears in subject OR body, not requiring both."""
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="m1", subject="Meeting notes", body_plain="Nothing about finance"),
+                _make_email(id="m2", subject="No match here", body_plain="The meeting was productive"),
+            ])
+            results = cache.search("meeting")
+            assert len(results) == 2
+
+
+class TestFilterEmails:
+    """Filter by sender, date range, label — all combinable."""
+
+    def test_filter_by_sender(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="m1", sender="alice@co.com"),
+                _make_email(id="m2", sender="bob@co.com"),
+                _make_email(id="m3", sender="alice@co.com"),
+            ])
+            results = cache.filter_emails(sender="alice@co.com")
+            assert len(results) == 2
+            assert all(r.sender == "alice@co.com" for r in results)
+
+    def test_filter_by_date_range(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="jan", date=datetime(2026, 1, 15, tzinfo=timezone.utc)),
+                _make_email(id="feb", date=datetime(2026, 2, 15, tzinfo=timezone.utc)),
+                _make_email(id="mar", date=datetime(2026, 3, 15, tzinfo=timezone.utc)),
+            ])
+            results = cache.filter_emails(
+                date_from=datetime(2026, 2, 1, tzinfo=timezone.utc),
+                date_to=datetime(2026, 2, 28, tzinfo=timezone.utc),
+            )
+            assert len(results) == 1
+            assert results[0].id == "feb"
+
+    def test_filter_by_label(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="m1", labels=["INBOX", "IMPORTANT"]),
+                _make_email(id="m2", labels=["INBOX"]),
+                _make_email(id="m3", labels=["SENT"]),
+            ])
+            results = cache.filter_emails(label="IMPORTANT")
+            assert len(results) == 1
+            assert results[0].id == "m1"
+
+    def test_filter_combined_sender_and_label(self):
+        """Multiple filters are ANDed together."""
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="m1", sender="alice@co.com", labels=["INBOX"]),
+                _make_email(id="m2", sender="alice@co.com", labels=["SENT"]),
+                _make_email(id="m3", sender="bob@co.com", labels=["INBOX"]),
+            ])
+            results = cache.filter_emails(sender="alice@co.com", label="INBOX")
+            assert len(results) == 1
+            assert results[0].id == "m1"
+
+    def test_filter_combined_sender_and_date(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="m1", sender="alice@co.com", date=datetime(2026, 1, 1, tzinfo=timezone.utc)),
+                _make_email(id="m2", sender="alice@co.com", date=datetime(2026, 3, 1, tzinfo=timezone.utc)),
+                _make_email(id="m3", sender="bob@co.com", date=datetime(2026, 3, 1, tzinfo=timezone.utc)),
+            ])
+            results = cache.filter_emails(
+                sender="alice@co.com",
+                date_from=datetime(2026, 2, 1, tzinfo=timezone.utc),
+            )
+            assert len(results) == 1
+            assert results[0].id == "m2"
+
+    def test_filter_no_params_returns_all(self):
+        """No filters = return everything (up to limit)."""
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([_make_email(id=f"m{i}") for i in range(5)])
+            results = cache.filter_emails()
+            assert len(results) == 5
+
+    def test_filter_respects_limit(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id=f"m{i}", sender="same@co.com") for i in range(20)
+            ])
+            results = cache.filter_emails(sender="same@co.com", limit=3)
+            assert len(results) == 3
+
+    def test_filter_ordered_by_date_desc(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="old", sender="a@co.com", date=datetime(2026, 1, 1, tzinfo=timezone.utc)),
+                _make_email(id="new", sender="a@co.com", date=datetime(2026, 3, 1, tzinfo=timezone.utc)),
+            ])
+            results = cache.filter_emails(sender="a@co.com")
+            assert results[0].id == "new"
+            assert results[1].id == "old"
+
+
+class TestFilePersistence:
+    """Data survives closing and reopening a file-backed DuckDB."""
+
+    def test_data_persists_across_sessions(self, tmp_path):
+        db_path = str(tmp_path / "test.duckdb")
+
+        # Session 1: write
+        with EmailCache(db_path=db_path) as cache:
+            cache.upsert_emails([
+                _make_email(id="persist1", subject="Persistent Email",
+                            date=datetime(2026, 3, 4, tzinfo=timezone.utc)),
+            ])
+            cache.update_sync_state()
+
+        # Session 2: read back
+        with EmailCache(db_path=db_path) as cache:
+            assert cache.count() == 1
+            email = cache.get_email("persist1")
+            assert email is not None
+            assert email.subject == "Persistent Email"
+            assert cache.get_last_sync_date() == datetime(2026, 3, 4, tzinfo=timezone.utc)
+
+    def test_upsert_persists_across_sessions(self, tmp_path):
+        db_path = str(tmp_path / "test.duckdb")
+
+        # Session 1: insert
+        with EmailCache(db_path=db_path) as cache:
+            cache.upsert_emails([_make_email(id="m1", subject="First")])
+
+        # Session 2: upsert same ID + add new
+        with EmailCache(db_path=db_path) as cache:
+            cache.upsert_emails([
+                _make_email(id="m1", subject="Updated"),
+                _make_email(id="m2", subject="Second"),
+            ])
+
+        # Session 3: verify
+        with EmailCache(db_path=db_path) as cache:
+            assert cache.count() == 2
+            assert cache.get_email("m1").subject == "Updated"
+            assert cache.get_email("m2").subject == "Second"
+
+    def test_search_works_after_reopen(self, tmp_path):
+        db_path = str(tmp_path / "test.duckdb")
+
+        with EmailCache(db_path=db_path) as cache:
+            cache.upsert_emails([_make_email(id="m1", subject="Budget report Q1")])
+
+        with EmailCache(db_path=db_path) as cache:
+            results = cache.search("budget")
+            assert len(results) == 1
+            assert results[0].id == "m1"

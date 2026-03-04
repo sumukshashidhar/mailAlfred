@@ -154,6 +154,11 @@ class EmailCache:
             return None
         return self._row_to_email(row, columns)
 
+    def _rows_to_emails(self, result) -> list[Email]:
+        """Convert a DuckDB result set to Email objects."""
+        columns = [desc[0] for desc in result.description]
+        return [self._row_to_email(row, columns) for row in result.fetchall()]
+
     @staticmethod
     def _row_to_email(row: tuple, columns: list[str]) -> Email:
         """Convert a DuckDB result row to an Email dataclass.
@@ -197,6 +202,73 @@ class EmailCache:
             labels=list(data.get("labels") or []),
             attachments=attachments,
         )
+
+    # ------------------------------------------------------------------
+    # Search & filter
+    # ------------------------------------------------------------------
+
+    def search(self, query: str, limit: int = 50) -> list[Email]:
+        """Search emails by subject and body (case-insensitive)."""
+        pattern = f"%{query}%"
+        result = self._conn.execute(
+            """
+            SELECT id, thread_id, subject, sender,
+                   recipients, cc, bcc, date,
+                   message_id, in_reply_to, "references",
+                   snippet, body_plain, body_html,
+                   labels, attachment_meta
+            FROM emails
+            WHERE subject ILIKE ? OR body_plain ILIKE ?
+            ORDER BY date DESC NULLS LAST
+            LIMIT ?
+            """,
+            [pattern, pattern, limit],
+        )
+        return self._rows_to_emails(result)
+
+    def filter_emails(
+        self,
+        sender: str | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        label: str | None = None,
+        limit: int = 50,
+    ) -> list[Email]:
+        """Filter emails by sender, date range, label. All params optional and ANDed."""
+        conditions: list[str] = []
+        params: list = []
+
+        if sender is not None:
+            conditions.append("sender = ?")
+            params.append(sender)
+        if date_from is not None:
+            conditions.append("date >= ?")
+            params.append(date_from)
+        if date_to is not None:
+            conditions.append("date <= ?")
+            params.append(date_to)
+        if label is not None:
+            conditions.append("list_contains(labels, ?)")
+            params.append(label)
+
+        where = " AND ".join(conditions) if conditions else "TRUE"
+        params.append(limit)
+
+        result = self._conn.execute(
+            f"""
+            SELECT id, thread_id, subject, sender,
+                   recipients, cc, bcc, date,
+                   message_id, in_reply_to, "references",
+                   snippet, body_plain, body_html,
+                   labels, attachment_meta
+            FROM emails
+            WHERE {where}
+            ORDER BY date DESC NULLS LAST
+            LIMIT ?
+            """,
+            params,
+        )
+        return self._rows_to_emails(result)
 
     # ------------------------------------------------------------------
     # Sync state
