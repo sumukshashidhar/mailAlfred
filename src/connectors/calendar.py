@@ -11,7 +11,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
 
-WRITE_CALENDAR_ID = "Assistant"
+WRITE_CALENDAR_NAME = "Assistant"
 
 
 class Calendar:
@@ -28,6 +28,8 @@ class Calendar:
         self._token_path = token_path
         self._service = None
         self._calendar_ids: list[str] | None = None
+        self._calendar_name_to_id: dict[str, str] | None = None
+        self._write_calendar_id: str | None = None
 
     # ------------------------------------------------------------------
     # Auth
@@ -57,24 +59,43 @@ class Calendar:
     # ------------------------------------------------------------------
 
     def _get_all_calendar_ids(self) -> list[str]:
-        """Fetch all calendar IDs the user has access to."""
+        """Fetch all calendar IDs the user has access to.
+
+        Also builds the name-to-ID mapping and resolves the write calendar.
+        """
         if self._calendar_ids is not None:
             return self._calendar_ids
 
         service = self._get_service()
         calendars: list[str] = []
+        name_to_id: dict[str, str] = {}
         page_token = None
 
         while True:
             response = service.calendarList().list(pageToken=page_token).execute()
             for entry in response.get("items", []):
                 calendars.append(entry["id"])
+                name_to_id[entry.get("summary", "")] = entry["id"]
             page_token = response.get("nextPageToken")
             if not page_token:
                 break
 
         self._calendar_ids = calendars
+        self._calendar_name_to_id = name_to_id
+        self._write_calendar_id = name_to_id.get(WRITE_CALENDAR_NAME)
+        if not self._write_calendar_id:
+            raise ValueError(
+                f"Calendar '{WRITE_CALENDAR_NAME}' not found. "
+                f"Available: {list(name_to_id.keys())}"
+            )
         return calendars
+
+    @property
+    def write_calendar_id(self) -> str:
+        """The resolved ID of the write-only calendar."""
+        if self._write_calendar_id is None:
+            self._get_all_calendar_ids()
+        return self._write_calendar_id  # type: ignore[return-value]
 
     def _list_events_sync(
         self,
@@ -128,7 +149,7 @@ class Calendar:
         """Get a single event by ID."""
         service = self._get_service()
         return service.events().get(
-            calendarId=calendar_id or WRITE_CALENDAR_ID, eventId=event_id
+            calendarId=calendar_id or self.write_calendar_id, eventId=event_id
         ).execute()
 
     def _update_event_sync(
@@ -144,7 +165,7 @@ class Calendar:
         service = self._get_service()
         body.pop("attendees", None)
         return service.events().patch(
-            calendarId=calendar_id or WRITE_CALENDAR_ID,
+            calendarId=calendar_id or self.write_calendar_id,
             eventId=event_id,
             body=body,
             sendUpdates="none",
@@ -169,7 +190,7 @@ class Calendar:
             "end": {"dateTime": end},
         }
         return service.events().insert(
-            calendarId=WRITE_CALENDAR_ID,
+            calendarId=self.write_calendar_id,
             body=body,
             sendUpdates="none",
         ).execute()

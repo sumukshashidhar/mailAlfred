@@ -53,7 +53,7 @@ Apply exactly one label. Use the first that matches; earlier labels take priorit
 - `get_emails_from_sender(sender)`: See recent emails from a sender.
 
 ### Task Management
-- `create_task(content, description, project_id, priority, due_string, labels)`: Create a Todoist task. Use clear, imperative titles. Route to an appropriate project if obvious, otherwise omit project_id (goes to Inbox).
+- `create_task(content, description, project, priority, due_string, labels)`: Create a Todoist task. Use clear, imperative titles. Pass the project name (e.g. "Work", "Personal"); omit for Inbox.
 - `add_comment(task_id, content)`: Add context to an existing task (email details, key quotes).
 
 ### Calendar

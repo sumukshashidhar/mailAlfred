@@ -6,6 +6,7 @@ from datetime import datetime
 
 from agents import Agent, ModelSettings, RunContextWrapper, function_tool
 from jinja2 import Environment, FileSystemLoader
+from openai.types.shared import Reasoning
 
 from src.agents.context import PROMPTS_DIR, PipelineContext
 from src.cache.email_cache import EmailCache
@@ -115,7 +116,7 @@ async def create_task(
     ctx: RunContextWrapper[PipelineContext],
     content: str,
     description: str = "",
-    project_id: str = "",
+    project: str = "",
     priority: int = 1,
     due_string: str = "",
     labels: str = "",
@@ -125,17 +126,22 @@ async def create_task(
     Args:
         content: Task title (clear, actionable, imperative form).
         description: Longer description with context.
-        project_id: Target project ID (omit for Inbox).
+        project: Project name (e.g. "Work", "Personal"). Omit for Inbox.
         priority: 1 (normal) to 4 (urgent).
         due_string: Natural language due date (e.g. 'tomorrow', 'Friday', 'March 10').
         labels: Comma-separated label names to apply.
     """
     label_list = [lb.strip() for lb in labels.split(",") if lb.strip()] if labels else None
 
+    # Resolve project name to ID
+    project_id = None
+    if project:
+        project_id = ctx.context.todoist_project_ids.get(project.lower())
+
     result = await ctx.context.todoist.create_task(
         content=content,
         description=description,
-        project_id=project_id or None,
+        project_id=project_id,
         priority=priority,
         due_string=due_string or None,
         labels=label_list,
@@ -273,7 +279,10 @@ def build_triage_agent(
         name="Triage Agent",
         instructions=instructions,
         model="gpt-5.2",
-        model_settings=ModelSettings(extra_args={"service_tier": "flex"}),
+        model_settings=ModelSettings(
+            reasoning=Reasoning(effort="medium", summary="auto"),
+            extra_args={"service_tier": "flex"},
+        ),
         tools=ALL_TOOLS,
     )
 

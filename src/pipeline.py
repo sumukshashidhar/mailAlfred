@@ -48,10 +48,11 @@ async def run_pipeline(limit: int = 5, max_concurrent: int = 3) -> list[dict]:
 
     # --- Pre-fetch context (parallel) ---
     logger.info("Pre-fetching Todoist and Calendar context...")
-    todoist_ctx, calendar_ctx = await asyncio.gather(
+    todoist_result, calendar_ctx = await asyncio.gather(
         fetch_todoist_context(todoist),
         fetch_calendar_context(calendar),
     )
+    todoist_ctx, todoist_project_ids = todoist_result
 
     # --- Build agent ---
     agent = build_triage_agent(todoist_context=todoist_ctx, calendar_context=calendar_ctx)
@@ -77,6 +78,7 @@ async def run_pipeline(limit: int = 5, max_concurrent: int = 3) -> list[dict]:
                     current_email=email,
                     calendar=calendar,
                     todoist=todoist,
+                    todoist_project_ids=todoist_project_ids,
                 )
 
                 result = await Runner.run(

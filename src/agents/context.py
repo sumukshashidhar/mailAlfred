@@ -32,6 +32,7 @@ class PipelineContext:
     current_email: Email
     calendar: Calendar
     todoist: Todoist
+    todoist_project_ids: dict[str, str]  # lowercase name -> project ID
 
 
 # ------------------------------------------------------------------
@@ -39,26 +40,33 @@ class PipelineContext:
 # ------------------------------------------------------------------
 
 
-async def fetch_todoist_context(todoist: Todoist) -> str:
-    """Fetch projects, labels, and active tasks; return as formatted markdown."""
+async def fetch_todoist_context(todoist: Todoist) -> tuple[str, dict[str, str]]:
+    """Fetch projects, labels, and active tasks.
+
+    Returns:
+        Tuple of (formatted markdown context, project name->ID mapping).
+    """
     projects, labels, tasks = await asyncio.gather(
         todoist.get_projects(),
         todoist.get_labels(),
         todoist.get_tasks(),
     )
 
+    # Build name -> ID lookup (lowercase keys for fuzzy matching)
+    project_ids = {p["name"].lower(): p["id"] for p in projects}
+
     lines: list[str] = []
 
-    # Projects
+    # Projects (names only, no IDs)
     lines.append("## Your Todoist Projects\n")
     for p in projects:
-        lines.append(f"- **{p['name']}** (id: `{p['id']}`)")
+        lines.append(f"- {p['name']}")
     lines.append("")
 
-    # Labels
+    # Labels (names only)
     lines.append("## Your Todoist Labels\n")
     for lb in labels:
-        lines.append(f"- {lb['name']} (id: `{lb['id']}`)")
+        lines.append(f"- {lb['name']}")
     lines.append("")
 
     # Active tasks (grouped by project)
@@ -80,15 +88,18 @@ async def fetch_todoist_context(todoist: Todoist) -> str:
             lines.append(f"- [{_priority_label(priority)}] {t['content']}{due}")
         lines.append("")
 
-    return "\n".join(lines)
+    return "\n".join(lines), project_ids
 
 
 async def fetch_calendar_context(
     calendar: Calendar,
-    weeks_back: int = 2,
-    weeks_forward: int = 1,
+    weeks_back: int = 1,
+    weeks_forward: int = 2,
 ) -> str:
-    """Fetch recent and upcoming calendar events; return as formatted markdown."""
+    """Fetch recent and upcoming calendar events; return as formatted markdown.
+
+    Strips IDs, HTML, and status to keep context clean for the agent.
+    """
     now = datetime.now(timezone.utc)
     time_min = now - timedelta(weeks=weeks_back)
     time_max = now + timedelta(weeks=weeks_forward)
@@ -97,7 +108,7 @@ async def fetch_calendar_context(
 
     lines: list[str] = []
     lines.append(
-        f"## Your Calendar ({weeks_back}w back to {weeks_forward}w ahead)\n"
+        f"## Your Calendar ({weeks_back}w back, {weeks_forward}w ahead)\n"
     )
 
     if not events:
@@ -108,16 +119,12 @@ async def fetch_calendar_context(
         start = _event_time(ev, "start")
         end = _event_time(ev, "end")
         summary = ev.get("summary", "(no title)")
-        event_id = ev.get("id", "")
-        status = ev.get("status", "confirmed")
-        description = ev.get("description", "")
+        location = ev.get("location", "")
 
-        cal_id = ev.get("_calendarId", "")
-        cal_label = f" [{cal_id}]" if cal_id else ""
-        lines.append(f"- **{summary}** | {start} - {end} | id: `{event_id}` | {status}{cal_label}")
-        if description:
-            short = description[:200] + ("..." if len(description) > 200 else "")
-            lines.append(f"  > {short}")
+        line = f"- **{summary}** | {start} - {end}"
+        if location:
+            line += f" | {location}"
+        lines.append(line)
 
     lines.append("")
     return "\n".join(lines)
