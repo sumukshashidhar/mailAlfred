@@ -1,9 +1,22 @@
 """Tests for the DuckDB email cache."""
 
+import json
+
 import duckdb
 import pytest
 
 from src.cache import EmailCache
+from src.models import Attachment, Email
+
+
+def _make_email(
+    id: str = "msg1",
+    thread_id: str = "t1",
+    subject: str = "Test",
+    sender: str = "alice@example.com",
+    **kwargs,
+) -> Email:
+    return Email(id=id, thread_id=thread_id, subject=subject, sender=sender, **kwargs)
 
 
 class TestSchemaCreation:
@@ -65,3 +78,80 @@ class TestSchemaCreation:
                 "WHERE table_name = 'emails'"
             ).fetchone()
             assert result is not None
+
+
+class TestUpsertEmails:
+    """Task 3: upsert_emails tests."""
+
+    def test_insert_single_email(self):
+        with EmailCache(":memory:") as cache:
+            email = _make_email()
+            cache.upsert_emails([email])
+            row = cache._conn.execute(
+                "SELECT id, thread_id, subject, sender FROM emails"
+            ).fetchone()
+            assert row is not None
+            assert row[0] == "msg1"
+            assert row[1] == "t1"
+            assert row[2] == "Test"
+            assert row[3] == "alice@example.com"
+
+    def test_upsert_dedup_by_id(self):
+        with EmailCache(":memory:") as cache:
+            email1 = _make_email(id="msg1", subject="Original")
+            cache.upsert_emails([email1])
+
+            email2 = _make_email(id="msg1", subject="Updated")
+            cache.upsert_emails([email2])
+
+            count = cache._conn.execute(
+                "SELECT COUNT(*) FROM emails"
+            ).fetchone()[0]
+            assert count == 1
+
+            subject = cache._conn.execute(
+                "SELECT subject FROM emails WHERE id = 'msg1'"
+            ).fetchone()[0]
+            assert subject == "Updated"
+
+    def test_insert_multiple_emails(self):
+        with EmailCache(":memory:") as cache:
+            emails = [_make_email(id=f"msg{i}") for i in range(5)]
+            cache.upsert_emails(emails)
+
+            count = cache._conn.execute(
+                "SELECT COUNT(*) FROM emails"
+            ).fetchone()[0]
+            assert count == 5
+
+    def test_attachment_metadata_stored_as_json(self):
+        with EmailCache(":memory:") as cache:
+            att = Attachment(
+                filename="report.pdf",
+                mime_type="application/pdf",
+                size=1024,
+                attachment_id="att123",
+                data=b"binary-content",  # should NOT be stored
+            )
+            email = _make_email(attachments=[att])
+            cache.upsert_emails([email])
+
+            raw = cache._conn.execute(
+                "SELECT attachment_meta FROM emails WHERE id = 'msg1'"
+            ).fetchone()[0]
+            meta = json.loads(raw)
+            assert len(meta) == 1
+            assert meta[0]["filename"] == "report.pdf"
+            assert meta[0]["mime_type"] == "application/pdf"
+            assert meta[0]["size"] == 1024
+            assert meta[0]["attachment_id"] == "att123"
+            # Binary data must not appear in the JSON
+            assert "data" not in meta[0]
+
+    def test_empty_list_is_noop(self):
+        with EmailCache(":memory:") as cache:
+            cache.upsert_emails([])
+            count = cache._conn.execute(
+                "SELECT COUNT(*) FROM emails"
+            ).fetchone()[0]
+            assert count == 0

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
+
 import duckdb
+
+from src.models import Email
 
 
 class EmailCache:
@@ -46,6 +50,71 @@ class EmailCache:
                 total_cached    INTEGER DEFAULT 0
             )
         """)
+
+    # ------------------------------------------------------------------
+    # Write operations
+    # ------------------------------------------------------------------
+
+    def upsert_emails(self, emails: list[Email]) -> None:
+        """Insert or replace emails in the cache.
+
+        Deduplicates by Gmail message ID (the primary key).
+        Attachment binary data is excluded; only metadata is stored as JSON.
+        """
+        if not emails:
+            return
+
+        self._conn.executemany(
+            """
+            INSERT OR REPLACE INTO emails (
+                id, thread_id, subject, sender,
+                recipients, cc, bcc, date,
+                message_id, in_reply_to, "references",
+                snippet, body_plain, body_html,
+                labels, attachment_meta, cached_at
+            ) VALUES (
+                ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, CURRENT_TIMESTAMP
+            )
+            """,
+            [self._email_to_row(e) for e in emails],
+        )
+
+    @staticmethod
+    def _email_to_row(email: Email) -> tuple:
+        """Convert an Email dataclass to a tuple matching the INSERT columns."""
+        attachment_meta = json.dumps(
+            [
+                {
+                    "filename": a.filename,
+                    "mime_type": a.mime_type,
+                    "size": a.size,
+                    "attachment_id": a.attachment_id,
+                }
+                for a in email.attachments
+            ]
+        )
+        return (
+            email.id,
+            email.thread_id,
+            email.subject,
+            email.sender,
+            email.recipients,
+            email.cc,
+            email.bcc,
+            email.date,
+            email.message_id,
+            email.in_reply_to,
+            email.references,
+            email.snippet,
+            email.body_plain,
+            email.body_html,
+            email.labels,
+            attachment_meta,
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
