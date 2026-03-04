@@ -1,6 +1,7 @@
 """Tests for the DuckDB email cache."""
 
 import json
+from datetime import datetime, timezone
 
 import duckdb
 import pytest
@@ -155,3 +156,36 @@ class TestUpsertEmails:
                 "SELECT COUNT(*) FROM emails"
             ).fetchone()[0]
             assert count == 0
+
+
+class TestSyncState:
+    """Task 4: Sync state tests."""
+
+    def test_get_last_sync_date_returns_none_initially(self):
+        with EmailCache(db_path=":memory:") as cache:
+            assert cache.get_last_sync_date() is None
+
+    def test_update_sync_state_after_upsert(self):
+        with EmailCache(db_path=":memory:") as cache:
+            dt = datetime(2026, 3, 4, 12, 0, tzinfo=timezone.utc)
+            emails = [_make_email(date=dt)]
+            cache.upsert_emails(emails)
+            cache.update_sync_state()
+            last = cache.get_last_sync_date()
+            assert last == dt
+
+    def test_sync_state_uses_newest_email_date(self):
+        with EmailCache(db_path=":memory:") as cache:
+            old = datetime(2026, 1, 1, tzinfo=timezone.utc)
+            new = datetime(2026, 3, 4, tzinfo=timezone.utc)
+            cache.upsert_emails([
+                _make_email(id="old", date=old),
+                _make_email(id="new", date=new),
+            ])
+            cache.update_sync_state()
+            assert cache.get_last_sync_date() == new
+
+    def test_count(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([_make_email(id=f"m{i}") for i in range(3)])
+            assert cache.count() == 3

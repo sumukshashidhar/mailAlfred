@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 import duckdb
 
@@ -115,6 +116,36 @@ class EmailCache:
             email.labels,
             attachment_meta,
         )
+
+    # ------------------------------------------------------------------
+    # Read operations
+    # ------------------------------------------------------------------
+
+    def get_last_sync_date(self) -> datetime | None:
+        """Return the last sync date, or None if no sync has been recorded."""
+        row = self._conn.execute(
+            "SELECT last_sync_date FROM sync_state WHERE id = 1"
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return row[0]
+
+    def count(self) -> int:
+        """Return the total number of cached emails."""
+        row = self._conn.execute("SELECT COUNT(*) FROM emails").fetchone()
+        return row[0]
+
+    # ------------------------------------------------------------------
+    # Sync state
+    # ------------------------------------------------------------------
+
+    def update_sync_state(self) -> None:
+        """Update sync_state with the newest email date and total count."""
+        self._conn.execute("""
+            INSERT OR REPLACE INTO sync_state (id, last_sync_date, total_cached)
+            SELECT 1, MAX(date), COUNT(*)
+            FROM emails
+        """)
 
     # ------------------------------------------------------------------
     # Lifecycle
