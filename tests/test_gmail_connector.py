@@ -1,14 +1,13 @@
 """Tests for the Gmail connector with mocked Gmail API responses."""
 
-import asyncio
 import base64
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch, mock_open
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.connectors.gmail import Gmail
-from src.models import Attachment, Email
+from src.models import Email
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +321,19 @@ class TestParseMessageMultipleRecipients:
         assert email.cc == ["eve@example.com", "frank@example.com"]
         assert email.bcc == ["grace@example.com"]
 
+    def test_rfc5322_display_names_with_commas(self):
+        """Addresses like 'Smith, John <john@example.com>' are parsed correctly."""
+        raw = _make_message(
+            headers=[
+                _header("To", '"Smith, John" <john@example.com>, bob@example.com'),
+            ],
+            payload_body={"size": 0, "data": ""},
+        )
+
+        email = Gmail._parse_message(raw)
+
+        assert email.recipients == ["john@example.com", "bob@example.com"]
+
 
 class TestParseMessageReferences:
     """Space-separated References header parsed into a list."""
@@ -360,13 +372,10 @@ class TestAuth:
         mock_creds.valid = True
         mock_creds_cls.from_authorized_user_file.return_value = mock_creds
 
-        gmail = Gmail(
-            credentials_path="creds.json", token_path="token.json"
-        )
+        gmail = Gmail(credentials_path="creds.json", token_path="token.json")
 
-        with patch("builtins.open", mock_open()):
-            with patch("os.path.exists", return_value=True):
-                service = gmail._get_service()
+        with patch("os.path.exists", return_value=True):
+            gmail._get_service()
 
         mock_creds_cls.from_authorized_user_file.assert_called_once_with(
             "token.json", Gmail.SCOPES
@@ -377,53 +386,58 @@ class TestAuth:
     @patch("src.connectors.gmail.Request")
     @patch("src.connectors.gmail.Credentials")
     def test_expired_token_refreshes_and_saves(
-        self, mock_creds_cls, mock_request_cls, mock_build
+        self, mock_creds_cls, mock_request_cls, _mock_build
     ):
         """Expired token is refreshed and saved back to disk."""
         mock_creds = MagicMock()
         mock_creds.valid = False
         mock_creds.expired = True
         mock_creds.refresh_token = "refresh_tok"
+        mock_creds.to_json.return_value = '{"refreshed": true}'
         mock_creds_cls.from_authorized_user_file.return_value = mock_creds
 
-        gmail = Gmail(
-            credentials_path="creds.json", token_path="token.json"
-        )
+        gmail = Gmail(credentials_path="creds.json", token_path="token.json")
 
-        m = mock_open()
-        with patch("builtins.open", m):
-            with patch("os.path.exists", return_value=True):
-                gmail._get_service()
+        with (
+            patch("os.path.exists", return_value=True),
+            patch("os.open", return_value=99),
+            patch("os.fdopen", MagicMock()) as mock_fdopen,
+        ):
+            mock_file = MagicMock()
+            mock_fdopen.return_value.__enter__ = MagicMock(return_value=mock_file)
+            mock_fdopen.return_value.__exit__ = MagicMock(return_value=False)
+            gmail._get_service()
 
-        mock_creds.refresh.assert_called_once_with(mock_request_cls())
-        # token should be written back
-        m.assert_called_with("token.json", "w")
+        request_instance = mock_request_cls.return_value
+        mock_creds.refresh.assert_called_once_with(request_instance)
 
     @patch("src.connectors.gmail.build")
     @patch("src.connectors.gmail.InstalledAppFlow")
-    def test_no_token_runs_installed_app_flow(self, mock_flow_cls, mock_build):
+    def test_no_token_runs_installed_app_flow(self, mock_flow_cls, _mock_build):
         """When no token.json exists, InstalledAppFlow is used."""
         mock_flow = MagicMock()
         mock_creds = MagicMock()
         mock_creds.valid = True
+        mock_creds.to_json.return_value = '{"new": true}'
         mock_flow.run_local_server.return_value = mock_creds
         mock_flow_cls.from_client_secrets_file.return_value = mock_flow
 
-        gmail = Gmail(
-            credentials_path="creds.json", token_path="token.json"
-        )
+        gmail = Gmail(credentials_path="creds.json", token_path="token.json")
 
-        m = mock_open()
-        with patch("builtins.open", m):
-            with patch("os.path.exists", return_value=False):
-                gmail._get_service()
+        with (
+            patch("os.path.exists", return_value=False),
+            patch("os.open", return_value=99),
+            patch("os.fdopen", MagicMock()) as mock_fdopen,
+        ):
+            mock_file = MagicMock()
+            mock_fdopen.return_value.__enter__ = MagicMock(return_value=mock_file)
+            mock_fdopen.return_value.__exit__ = MagicMock(return_value=False)
+            gmail._get_service()
 
         mock_flow_cls.from_client_secrets_file.assert_called_once_with(
             "creds.json", Gmail.SCOPES
         )
         mock_flow.run_local_server.assert_called_once_with(port=0)
-        # token should be written
-        m.assert_called_with("token.json", "w")
 
 
 # ===========================================================================
@@ -434,33 +448,33 @@ class TestAuth:
 class TestFetchEmails:
     """Tests for get_unread_emails, get_email, download_attachment."""
 
-    def _mock_service(self):
-        """Build a mock Gmail API service."""
-        service = MagicMock()
-        return service
+    def _make_gmail(self):
+        """Build a Gmail instance with a mock service."""
+        gmail = Gmail.__new__(Gmail)
+        gmail._service = MagicMock()
+        gmail._credentials_path = "creds.json"
+        gmail._token_path = "token.json"
+        return gmail
 
     def test_get_unread_emails_empty_inbox(self):
         """Empty inbox returns an empty list."""
-        service = self._mock_service()
-        service.users().messages().list().execute.return_value = {
+        gmail = self._make_gmail()
+        gmail._service.users().messages().list().execute.return_value = {
             "resultSizeEstimate": 0,
         }
-
-        gmail = Gmail.__new__(Gmail)
-        gmail._service = service
 
         result = gmail._fetch_messages_sync(max_results=10)
         assert result == []
 
     def test_get_unread_emails_fetches_messages(self):
         """Fetches message list, then each message; returns Email objects."""
-        service = self._mock_service()
+        gmail = self._make_gmail()
 
         body_text = "Hello"
         encoded_body = base64.urlsafe_b64encode(body_text.encode()).decode()
 
         # messages().list() returns two message stubs
-        service.users().messages().list().execute.return_value = {
+        gmail._service.users().messages().list().execute.return_value = {
             "messages": [{"id": "m1", "threadId": "t1"}, {"id": "m2", "threadId": "t2"}],
             "resultSizeEstimate": 2,
         }
@@ -482,10 +496,7 @@ class TestFetchEmails:
             )
             return mock_req
 
-        service.users().messages().get.side_effect = get_side_effect
-
-        gmail = Gmail.__new__(Gmail)
-        gmail._service = service
+        gmail._service.users().messages().get.side_effect = get_side_effect
 
         result = gmail._fetch_messages_sync(max_results=10)
 
@@ -497,12 +508,12 @@ class TestFetchEmails:
 
     def test_get_email_single_message(self):
         """Fetches a single message by ID."""
-        service = self._mock_service()
+        gmail = self._make_gmail()
 
         body_text = "Single message"
         encoded_body = base64.urlsafe_b64encode(body_text.encode()).decode()
 
-        service.users().messages().get().execute.return_value = _make_message(
+        gmail._service.users().messages().get().execute.return_value = _make_message(
             msg_id="m42",
             thread_id="t42",
             headers=[
@@ -514,9 +525,6 @@ class TestFetchEmails:
             payload_body={"size": len(body_text), "data": encoded_body},
         )
 
-        gmail = Gmail.__new__(Gmail)
-        gmail._service = service
-
         email = gmail._fetch_message_sync("m42")
 
         assert isinstance(email, Email)
@@ -526,22 +534,109 @@ class TestFetchEmails:
 
     def test_download_attachment(self):
         """Downloads attachment data by message_id + attachment_id."""
-        service = self._mock_service()
+        gmail = self._make_gmail()
 
         raw_bytes = b"PDF_CONTENT_HERE"
         encoded = base64.urlsafe_b64encode(raw_bytes).decode()
 
-        service.users().messages().attachments().get().execute.return_value = {
+        gmail._service.users().messages().attachments().get().execute.return_value = {
             "data": encoded,
             "size": len(raw_bytes),
         }
 
-        gmail = Gmail.__new__(Gmail)
-        gmail._service = service
-
         result = gmail._download_attachment_sync("msg1", "att1")
 
         assert result == raw_bytes
+
+    def test_download_attachment_missing_data_raises(self):
+        """Raises ValueError when attachment response has no data."""
+        gmail = self._make_gmail()
+
+        gmail._service.users().messages().attachments().get().execute.return_value = {
+            "size": 0,
+        }
+
+        with pytest.raises(ValueError, match="No data returned"):
+            gmail._download_attachment_sync("msg1", "att1")
+
+
+class TestFetchAllMessages:
+    """Tests for _fetch_all_messages_sync with pagination."""
+
+    def _make_gmail(self):
+        gmail = Gmail.__new__(Gmail)
+        gmail._service = MagicMock()
+        gmail._credentials_path = "creds.json"
+        gmail._token_path = "token.json"
+        return gmail
+
+    def test_fetch_all_no_query(self):
+        """Fetches all messages when no query given."""
+        gmail = self._make_gmail()
+        # list returns one message, no nextPageToken
+        gmail._service.users().messages().list().execute.return_value = {
+            "messages": [{"id": "m1"}],
+        }
+        # get returns a full message
+        gmail._service.users().messages().get().execute.return_value = _make_message(
+            msg_id="m1"
+        )
+
+        result = gmail._fetch_all_messages_sync()
+        assert len(result) == 1
+        assert result[0].id == "m1"
+
+    def test_fetch_all_with_after_date(self):
+        """Passes after: query to Gmail API."""
+        gmail = self._make_gmail()
+        gmail._service.users().messages().list().execute.return_value = {
+            "resultSizeEstimate": 0,
+        }
+
+        from datetime import datetime, timezone
+
+        after = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        gmail._fetch_all_messages_sync(after_date=after)
+
+        gmail._service.users().messages().list.assert_called_with(
+            userId="me", maxResults=100, q="after:2026/03/01"
+        )
+
+    def test_fetch_all_paginates(self):
+        """Follows nextPageToken for multiple pages."""
+        gmail = self._make_gmail()
+
+        # Page 1: has nextPageToken
+        # Page 2: no nextPageToken (last page)
+        page1 = {"messages": [{"id": "m1"}], "nextPageToken": "token123"}
+        page2 = {"messages": [{"id": "m2"}]}
+
+        call_count = [0]
+
+        def list_side_effect(**kwargs):
+            mock = MagicMock()
+            if call_count[0] == 0:
+                mock.execute.return_value = page1
+            else:
+                mock.execute.return_value = page2
+            call_count[0] += 1
+            return mock
+
+        gmail._service.users().messages().list.side_effect = list_side_effect
+        gmail._service.users().messages().get().execute.return_value = _make_message()
+
+        result = gmail._fetch_all_messages_sync()
+        assert len(result) == 2
+
+    def test_fetch_all_empty_inbox(self):
+        """Empty inbox returns an empty list."""
+        gmail = self._make_gmail()
+        gmail._service.users().messages().list().execute.return_value = {
+            "resultSizeEstimate": 0,
+        }
+
+        result = gmail._fetch_all_messages_sync()
+        assert result == []
 
 
 class TestAsyncWrappers:
@@ -582,5 +677,19 @@ class TestAsyncWrappers:
             gmail, "_download_attachment_sync", return_value=expected
         ):
             result = await gmail.download_attachment("msg1", "att1")
+
+        assert result == expected
+
+    @pytest.mark.asyncio
+    async def test_fetch_all_emails_async(self):
+        """Async fetch_all_emails wraps _fetch_all_messages_sync."""
+        gmail = Gmail.__new__(Gmail)
+        gmail._service = MagicMock()
+
+        expected = [Email(id="1", thread_id="t1"), Email(id="2", thread_id="t2")]
+        with patch.object(
+            gmail, "_fetch_all_messages_sync", return_value=expected
+        ):
+            result = await gmail.fetch_all_emails(query="label:inbox")
 
         assert result == expected

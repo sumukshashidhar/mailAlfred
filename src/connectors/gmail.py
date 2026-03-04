@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import stat
 from datetime import datetime
-from email.utils import parsedate_to_datetime
+from email.utils import getaddresses, parsedate_to_datetime
 
 from bs4 import BeautifulSoup
 from google.auth.transport.requests import Request
@@ -55,7 +56,12 @@ class Gmail:
                     self._credentials_path, self.SCOPES
                 )
                 creds = flow.run_local_server(port=0)
-            with open(self._token_path, "w") as f:
+            fd = os.open(
+                self._token_path,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                stat.S_IRUSR | stat.S_IWUSR,  # 0o600
+            )
+            with os.fdopen(fd, "w") as f:
                 f.write(creds.to_json())
 
         self._service = build("gmail", "v1", credentials=creds)
@@ -87,9 +93,11 @@ class Gmail:
             except (ValueError, TypeError):
                 date = None
 
-        # Parse comma-separated list headers
-        def _split_comma(value: str) -> list[str]:
-            return [s.strip() for s in value.split(",") if s.strip()]
+        # Parse address list headers (RFC 5322 compliant)
+        def _split_addresses(value: str) -> list[str]:
+            if not value:
+                return []
+            return [addr for _, addr in getaddresses([value]) if addr]
 
         # Parse space-separated References header
         def _split_space(value: str) -> list[str]:
@@ -106,9 +114,9 @@ class Gmail:
             thread_id=raw.get("threadId", ""),
             subject=headers.get("subject", ""),
             sender=headers.get("from", ""),
-            recipients=_split_comma(headers.get("to", "")),
-            cc=_split_comma(headers.get("cc", "")),
-            bcc=_split_comma(headers.get("bcc", "")),
+            recipients=_split_addresses(headers.get("to", "")),
+            cc=_split_addresses(headers.get("cc", "")),
+            bcc=_split_addresses(headers.get("bcc", "")),
             date=date,
             message_id=headers.get("message-id", ""),
             in_reply_to=headers.get("in-reply-to", ""),
@@ -144,10 +152,9 @@ class Gmail:
             if parts:
                 for sub in parts:
                     _walk(sub)
-                return
 
-            # Leaf part — skip attachments (they have a filename).
-            if part.get("filename"):
+            # Skip attachments (they have a filename) and container parts.
+            if part.get("filename") or parts:
                 return
 
             body = part.get("body", {})
@@ -201,9 +208,51 @@ class Gmail:
     # Sync fetch helpers
     # ------------------------------------------------------------------
 
+    def _fetch_all_messages_sync(
+        self,
+        query: str = "",
+        after_date: datetime | None = None,
+        batch_size: int = 100,
+    ) -> list[Email]:
+        """Fetch all messages matching query, with pagination."""
+        service = self._get_service()
+
+        q = query
+        if after_date:
+            date_str = after_date.strftime("%Y/%m/%d")
+            q = f"{q} after:{date_str}".strip()
+
+        all_emails: list[Email] = []
+        page_token = None
+
+        while True:
+            kwargs: dict = {"userId": "me", "maxResults": batch_size}
+            if q:
+                kwargs["q"] = q
+            if page_token:
+                kwargs["pageToken"] = page_token
+
+            response = service.users().messages().list(**kwargs).execute()
+            messages = response.get("messages", [])
+
+            for stub in messages:
+                raw = (
+                    service.users()
+                    .messages()
+                    .get(userId="me", id=stub["id"], format="full")
+                    .execute()
+                )
+                all_emails.append(self._parse_message(raw))
+
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+
+        return all_emails
+
     def _fetch_messages_sync(self, max_results: int = 10) -> list[Email]:
         """Fetch unread messages synchronously."""
-        service = self._get_service() if self._service is None else self._service
+        service = self._get_service()
         response = (
             service.users()
             .messages()
@@ -228,7 +277,7 @@ class Gmail:
 
     def _fetch_message_sync(self, email_id: str) -> Email:
         """Fetch a single message by ID synchronously."""
-        service = self._get_service() if self._service is None else self._service
+        service = self._get_service()
         raw = (
             service.users()
             .messages()
@@ -241,7 +290,7 @@ class Gmail:
         self, message_id: str, attachment_id: str
     ) -> bytes:
         """Download attachment data and return raw bytes."""
-        service = self._get_service() if self._service is None else self._service
+        service = self._get_service()
         response = (
             service.users()
             .messages()
@@ -249,12 +298,28 @@ class Gmail:
             .get(userId="me", messageId=message_id, id=attachment_id)
             .execute()
         )
-        data = response.get("data", "")
+        data = response.get("data")
+        if not data:
+            raise ValueError(
+                f"No data returned for attachment {attachment_id} "
+                f"on message {message_id}"
+            )
         return base64.urlsafe_b64decode(data)
 
     # ------------------------------------------------------------------
     # Public async API
     # ------------------------------------------------------------------
+
+    async def fetch_all_emails(
+        self,
+        query: str = "",
+        after_date: datetime | None = None,
+        batch_size: int = 100,
+    ) -> list[Email]:
+        """Fetch all emails matching query, with pagination, asynchronously."""
+        return await asyncio.to_thread(
+            self._fetch_all_messages_sync, query, after_date, batch_size
+        )
 
     async def get_unread_emails(self, max_results: int = 10) -> list[Email]:
         """Fetch unread emails asynchronously."""
