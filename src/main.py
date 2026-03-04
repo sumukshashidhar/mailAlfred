@@ -17,7 +17,7 @@ async def main() -> None:
         status = r["status"]
         subject = r["subject"][:60]
         if status == "ok":
-            logger.info(f"  [OK] {subject} -> {r['final_agent']}")
+            logger.info(f"  [OK] {subject}")
         else:
             logger.error(f"  [FAIL] {subject} -> {r['error']}")
 

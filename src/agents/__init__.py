@@ -1,1 +1,1 @@
-"""Agent definitions for the email triage pipeline."""
+"""Single triage agent with classification, task, and calendar tools."""

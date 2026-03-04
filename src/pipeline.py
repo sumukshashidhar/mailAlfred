@@ -1,4 +1,4 @@
-"""Email triage pipeline: sync, classify, label, delegate."""
+"""Email triage pipeline: sync, classify, label, and act."""
 
 from __future__ import annotations
 
@@ -7,10 +7,8 @@ import asyncio
 from agents import Runner
 from loguru import logger
 
-from src.agents.calendar import build_calendar_agent
+from src.agents.agent import build_triage_agent, render_email_input
 from src.agents.context import PipelineContext, fetch_calendar_context, fetch_todoist_context
-from src.agents.todoist import build_todoist_agent
-from src.agents.triage import build_triage_agent, render_email_for_triage
 from src.cache.email_cache import EmailCache
 from src.connectors.calendar import Calendar
 from src.connectors.gmail import Gmail
@@ -23,15 +21,11 @@ from src.sync import sync
 async def run_pipeline(limit: int = 5, max_concurrent: int = 3) -> list[dict]:
     """Run the full email triage pipeline.
 
-    1. Sync Gmail to local cache
-    2. Pre-fetch context for sub-agents
-    3. Build agent graph
-    4. Process unorganized emails concurrently
-    5. Mark processed emails as organized
-
-    Args:
-        limit: Max number of unorganized emails to process.
-        max_concurrent: Concurrency limit for LLM calls.
+    1. Sync Gmail to local cache.
+    2. Pre-fetch Todoist and Calendar context.
+    3. Build the triage agent (single agent, all tools).
+    4. Process unorganized emails concurrently.
+    5. Mark processed emails as organized.
 
     Returns:
         List of result dicts with email_id, subject, and outcome.
@@ -54,16 +48,13 @@ async def run_pipeline(limit: int = 5, max_concurrent: int = 3) -> list[dict]:
 
     # --- Pre-fetch context (parallel) ---
     logger.info("Pre-fetching Todoist and Calendar context...")
-    todoist_ctx_str, calendar_ctx_str = await asyncio.gather(
+    todoist_ctx, calendar_ctx = await asyncio.gather(
         fetch_todoist_context(todoist),
         fetch_calendar_context(calendar),
     )
-    logger.info("Context pre-fetched.")
 
-    # --- Build agents ---
-    calendar_agent = build_calendar_agent(calendar_ctx_str)
-    todoist_agent = build_todoist_agent(todoist_ctx_str)
-    triage_agent = build_triage_agent(calendar_agent, todoist_agent)
+    # --- Build agent ---
+    agent = build_triage_agent(todoist_context=todoist_ctx, calendar_context=calendar_ctx)
 
     # --- Process unorganized emails ---
     unorganized = cache.get_unorganized(limit=limit)
@@ -79,9 +70,6 @@ async def run_pipeline(limit: int = 5, max_concurrent: int = 3) -> list[dict]:
         async with semaphore:
             logger.info(f"Triaging: {email.subject[:60]}...")
             try:
-                input_text = render_email_for_triage(email)
-
-                # Unified context — shared across triage + any handoff agents
                 context = PipelineContext(
                     gmail=gmail,
                     cache=cache,
@@ -92,21 +80,17 @@ async def run_pipeline(limit: int = 5, max_concurrent: int = 3) -> list[dict]:
                 )
 
                 result = await Runner.run(
-                    triage_agent,
-                    input=input_text,
+                    agent,
+                    input=render_email_input(email),
                     context=context,
                 )
 
                 cache.mark_organized([email.id])
-                logger.info(
-                    f"Done: {email.subject[:60]} -> "
-                    f"final agent: {result.last_agent.name}"
-                )
+                logger.info(f"Done: {email.subject[:60]}")
                 return {
                     "email_id": email.id,
                     "subject": email.subject,
                     "status": "ok",
-                    "final_agent": result.last_agent.name,
                     "output": str(result.final_output)[:200],
                 }
             except Exception as e:
@@ -121,7 +105,6 @@ async def run_pipeline(limit: int = 5, max_concurrent: int = 3) -> list[dict]:
     results = await asyncio.gather(*(process_one(e) for e in unorganized))
     results = list(results)
 
-    # --- Summary ---
     ok = sum(1 for r in results if r["status"] == "ok")
     err = sum(1 for r in results if r["status"] == "error")
     logger.info(f"Pipeline complete: {ok} succeeded, {err} failed.")
