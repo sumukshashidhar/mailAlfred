@@ -14,6 +14,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from tqdm import tqdm
 
 from src.models import Attachment, Email
 
@@ -21,7 +22,14 @@ from src.models import Attachment, Email
 class Gmail:
     """Async-friendly Gmail connector wrapping the Google API client."""
 
-    SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+    SCOPES = [
+        # Gmail - full access
+        "https://mail.google.com/",
+        # Calendar - full access
+        "https://www.googleapis.com/auth/calendar",
+        # Drive - full access
+        "https://www.googleapis.com/auth/drive",
+    ]
 
     def __init__(
         self,
@@ -213,8 +221,13 @@ class Gmail:
         query: str = "",
         after_date: datetime | None = None,
         batch_size: int = 100,
+        max_emails: int = 0,
     ) -> list[Email]:
-        """Fetch all messages matching query, with pagination."""
+        """Fetch messages matching query, with pagination.
+
+        Args:
+            max_emails: Stop after fetching this many. 0 means no limit.
+        """
         service = self._get_service()
 
         q = query
@@ -224,9 +237,21 @@ class Gmail:
 
         all_emails: list[Email] = []
         page_token = None
+        pbar = tqdm(
+            total=max_emails if max_emails > 0 else None,
+            desc="Fetching emails",
+            unit="email",
+        )
 
         while True:
-            kwargs: dict = {"userId": "me", "maxResults": batch_size}
+            page_size = batch_size
+            if max_emails > 0:
+                remaining = max_emails - len(all_emails)
+                if remaining <= 0:
+                    break
+                page_size = min(batch_size, remaining)
+
+            kwargs: dict = {"userId": "me", "maxResults": page_size}
             if q:
                 kwargs["q"] = q
             if page_token:
@@ -236,6 +261,8 @@ class Gmail:
             messages = response.get("messages", [])
 
             for stub in messages:
+                if max_emails > 0 and len(all_emails) >= max_emails:
+                    break
                 raw = (
                     service.users()
                     .messages()
@@ -243,11 +270,13 @@ class Gmail:
                     .execute()
                 )
                 all_emails.append(self._parse_message(raw))
+                pbar.update(1)
 
             page_token = response.get("nextPageToken")
             if not page_token:
                 break
 
+        pbar.close()
         return all_emails
 
     def _fetch_messages_sync(self, max_results: int = 10) -> list[Email]:
@@ -307,6 +336,36 @@ class Gmail:
         return base64.urlsafe_b64decode(data)
 
     # ------------------------------------------------------------------
+    # Label operations (sync)
+    # ------------------------------------------------------------------
+
+    def _list_labels_sync(self) -> list[dict]:
+        """List all Gmail labels. Returns list of {id, name, type, ...}."""
+        service = self._get_service()
+        response = service.users().labels().list(userId="me").execute()
+        return response.get("labels", [])
+
+    def _apply_labels_sync(
+        self,
+        email_id: str,
+        add_label_ids: list[str] | None = None,
+        remove_label_ids: list[str] | None = None,
+    ) -> dict:
+        """Modify labels on a message."""
+        service = self._get_service()
+        body: dict = {}
+        if add_label_ids:
+            body["addLabelIds"] = add_label_ids
+        if remove_label_ids:
+            body["removeLabelIds"] = remove_label_ids
+        return (
+            service.users()
+            .messages()
+            .modify(userId="me", id=email_id, body=body)
+            .execute()
+        )
+
+    # ------------------------------------------------------------------
     # Public async API
     # ------------------------------------------------------------------
 
@@ -315,10 +374,15 @@ class Gmail:
         query: str = "",
         after_date: datetime | None = None,
         batch_size: int = 100,
+        max_emails: int = 0,
     ) -> list[Email]:
-        """Fetch all emails matching query, with pagination, asynchronously."""
+        """Fetch emails matching query, with pagination, asynchronously.
+
+        Args:
+            max_emails: Stop after fetching this many. 0 means no limit.
+        """
         return await asyncio.to_thread(
-            self._fetch_all_messages_sync, query, after_date, batch_size
+            self._fetch_all_messages_sync, query, after_date, batch_size, max_emails
         )
 
     async def get_unread_emails(self, max_results: int = 10) -> list[Email]:
@@ -335,4 +399,19 @@ class Gmail:
         """Download attachment data asynchronously."""
         return await asyncio.to_thread(
             self._download_attachment_sync, message_id, attachment_id
+        )
+
+    async def list_labels(self) -> list[dict]:
+        """List all Gmail labels asynchronously."""
+        return await asyncio.to_thread(self._list_labels_sync)
+
+    async def apply_labels(
+        self,
+        email_id: str,
+        add_label_ids: list[str] | None = None,
+        remove_label_ids: list[str] | None = None,
+    ) -> dict:
+        """Modify labels on a message asynchronously."""
+        return await asyncio.to_thread(
+            self._apply_labels_sync, email_id, add_label_ids, remove_label_ids
         )

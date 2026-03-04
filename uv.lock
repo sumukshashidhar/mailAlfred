@@ -936,11 +936,13 @@ dependencies = [
     { name = "google-api-python-client" },
     { name = "google-auth-httplib2" },
     { name = "google-auth-oauthlib" },
+    { name = "httpx" },
     { name = "jinja2" },
     { name = "loguru" },
     { name = "openai-agents" },
     { name = "python-dotenv" },
     { name = "pytz" },
+    { name = "tqdm" },
 ]
 
 [package.dev-dependencies]
@@ -958,11 +960,13 @@ requires-dist = [
     { name = "google-api-python-client", specifier = ">=2.150.0" },
     { name = "google-auth-httplib2", specifier = ">=0.2.0" },
     { name = "google-auth-oauthlib", specifier = ">=1.2.0" },
+    { name = "httpx", specifier = ">=0.28.0" },
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "openai-agents", specifier = ">=0.10.4" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "pytz", specifier = ">=2026.1.post1" },
+    { name = "tqdm", specifier = ">=4.67.0" },
 ]
 
 [package.metadata.requires-dev]

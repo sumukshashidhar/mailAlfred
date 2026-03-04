@@ -309,6 +309,103 @@ class TestGetEmail:
             assert retrieved.attachments == []
 
 
+class TestGetEmailThread:
+    """Thread retrieval by thread_id."""
+
+    def test_returns_all_emails_in_thread(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="m1", thread_id="t1", subject="First",
+                            date=datetime(2026, 3, 1, tzinfo=timezone.utc)),
+                _make_email(id="m2", thread_id="t1", subject="Reply",
+                            date=datetime(2026, 3, 2, tzinfo=timezone.utc)),
+                _make_email(id="m3", thread_id="t2", subject="Other thread"),
+            ])
+            thread = cache.get_email_thread("t1")
+            assert len(thread) == 2
+            assert {e.id for e in thread} == {"m1", "m2"}
+
+    def test_ordered_chronologically_oldest_first(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="reply", thread_id="t1",
+                            date=datetime(2026, 3, 3, tzinfo=timezone.utc)),
+                _make_email(id="original", thread_id="t1",
+                            date=datetime(2026, 3, 1, tzinfo=timezone.utc)),
+            ])
+            thread = cache.get_email_thread("t1")
+            assert [e.id for e in thread] == ["original", "reply"]
+
+    def test_nonexistent_thread_returns_empty(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([_make_email(id="m1", thread_id="t1")])
+            assert cache.get_email_thread("nonexistent") == []
+
+    def test_single_email_thread(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([_make_email(id="m1", thread_id="t1")])
+            thread = cache.get_email_thread("t1")
+            assert len(thread) == 1
+            assert thread[0].id == "m1"
+
+
+class TestGetEmailsFromSender:
+    """Sender lookup with ILIKE partial matching."""
+
+    def test_matches_by_email_address(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="m1", sender="alice@example.com"),
+                _make_email(id="m2", sender="bob@example.com"),
+            ])
+            results = cache.get_emails_from_sender("alice@example.com")
+            assert len(results) == 1
+            assert results[0].id == "m1"
+
+    def test_matches_display_name_format(self):
+        """Should match 'alice@example.com' even when stored as 'Alice <alice@example.com>'."""
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="m1", sender="Alice Smith <alice@example.com>"),
+                _make_email(id="m2", sender="bob@other.com"),
+            ])
+            results = cache.get_emails_from_sender("alice@example.com")
+            assert len(results) == 1
+            assert results[0].id == "m1"
+
+    def test_case_insensitive(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="m1", sender="Alice@Example.COM"),
+            ])
+            results = cache.get_emails_from_sender("alice@example.com")
+            assert len(results) == 1
+
+    def test_ordered_newest_first(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id="old", sender="alice@co.com",
+                            date=datetime(2026, 1, 1, tzinfo=timezone.utc)),
+                _make_email(id="new", sender="alice@co.com",
+                            date=datetime(2026, 3, 1, tzinfo=timezone.utc)),
+            ])
+            results = cache.get_emails_from_sender("alice@co.com")
+            assert [r.id for r in results] == ["new", "old"]
+
+    def test_respects_limit(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([
+                _make_email(id=f"m{i}", sender="alice@co.com") for i in range(10)
+            ])
+            results = cache.get_emails_from_sender("alice@co.com", limit=3)
+            assert len(results) == 3
+
+    def test_no_match_returns_empty(self):
+        with EmailCache(db_path=":memory:") as cache:
+            cache.upsert_emails([_make_email(id="m1", sender="bob@co.com")])
+            assert cache.get_emails_from_sender("alice@co.com") == []
+
+
 class TestSearch:
     """Full-text search across subject and body."""
 
@@ -319,7 +416,7 @@ class TestSearch:
                 _make_email(id="m2", subject="Lunch plans for Friday"),
                 _make_email(id="m3", subject="Annual budget review"),
             ])
-            results = cache.search("budget")
+            results = cache.search_emails("budget")
             assert len(results) == 2
             assert {r.id for r in results} == {"m1", "m3"}
 
@@ -329,7 +426,7 @@ class TestSearch:
                 _make_email(id="m1", body_plain="Please review the attached invoice"),
                 _make_email(id="m2", body_plain="See you at the meeting"),
             ])
-            results = cache.search("invoice")
+            results = cache.search_emails("invoice")
             assert len(results) == 1
             assert results[0].id == "m1"
 
@@ -338,20 +435,20 @@ class TestSearch:
             cache.upsert_emails([
                 _make_email(id="m1", subject="URGENT: Server Down"),
             ])
-            assert len(cache.search("urgent")) == 1
-            assert len(cache.search("server down")) == 1
+            assert len(cache.search_emails("urgent")) == 1
+            assert len(cache.search_emails("server down")) == 1
 
     def test_no_results_returns_empty(self):
         with EmailCache(db_path=":memory:") as cache:
             cache.upsert_emails([_make_email(id="m1", subject="Hello")])
-            assert cache.search("nonexistent") == []
+            assert cache.search_emails("nonexistent") == []
 
     def test_respects_limit(self):
         with EmailCache(db_path=":memory:") as cache:
             cache.upsert_emails([
                 _make_email(id=f"m{i}", subject=f"Report #{i}") for i in range(20)
             ])
-            results = cache.search("report", limit=5)
+            results = cache.search_emails("report", limit=5)
             assert len(results) == 5
 
     def test_ordered_by_date_desc(self):
@@ -362,7 +459,7 @@ class TestSearch:
                 _make_email(id="new", subject="Report new", date=datetime(2026, 3, 1, tzinfo=timezone.utc)),
                 _make_email(id="mid", subject="Report mid", date=datetime(2026, 2, 1, tzinfo=timezone.utc)),
             ])
-            results = cache.search("report")
+            results = cache.search_emails("report")
             assert [r.id for r in results] == ["new", "mid", "old"]
 
     def test_matches_across_subject_and_body(self):
@@ -372,15 +469,15 @@ class TestSearch:
                 _make_email(id="m1", subject="Meeting notes", body_plain="Nothing about finance"),
                 _make_email(id="m2", subject="No match here", body_plain="The meeting was productive"),
             ])
-            results = cache.search("meeting")
+            results = cache.search_emails("meeting")
             assert len(results) == 2
 
     def test_empty_query_returns_empty(self):
         """An empty or whitespace-only query should not match everything."""
         with EmailCache(db_path=":memory:") as cache:
             cache.upsert_emails([_make_email(id="m1", subject="Hello")])
-            assert cache.search("") == []
-            assert cache.search("   ") == []
+            assert cache.search_emails("") == []
+            assert cache.search_emails("   ") == []
 
     def test_percent_wildcard_treated_literally(self):
         """LIKE metacharacter % in the query should match the literal character."""
@@ -389,7 +486,7 @@ class TestSearch:
                 _make_email(id="m1", subject="100% complete"),
                 _make_email(id="m2", subject="100 complete"),
             ])
-            results = cache.search("100%")
+            results = cache.search_emails("100%")
             assert len(results) == 1
             assert results[0].id == "m1"
 
@@ -400,7 +497,7 @@ class TestSearch:
                 _make_email(id="m1", subject="in_reply_to header"),
                 _make_email(id="m2", subject="inXreplyXto header"),
             ])
-            results = cache.search("in_reply_to")
+            results = cache.search_emails("in_reply_to")
             assert len(results) == 1
             assert results[0].id == "m1"
 
@@ -620,6 +717,6 @@ class TestFilePersistence:
             cache.upsert_emails([_make_email(id="m1", subject="Budget report Q1")])
 
         with EmailCache(db_path=db_path) as cache:
-            results = cache.search("budget")
+            results = cache.search_emails("budget")
             assert len(results) == 1
             assert results[0].id == "m1"

@@ -223,10 +223,49 @@ class EmailCache:
         )
 
     # ------------------------------------------------------------------
+    # Thread & sender lookups
+    # ------------------------------------------------------------------
+
+    def get_email_thread(self, thread_id: str) -> list[Email]:
+        """Return all emails in a thread, ordered chronologically (oldest first)."""
+        result = self._conn.execute(
+            """
+            SELECT id, thread_id, subject, sender,
+                   recipients, cc, bcc, date,
+                   message_id, in_reply_to, "references",
+                   snippet, body_plain, body_html,
+                   labels, attachment_meta, organized
+            FROM emails
+            WHERE thread_id = ?
+            ORDER BY date ASC NULLS LAST
+            """,
+            [thread_id],
+        )
+        return self._rows_to_emails(result)
+
+    def get_emails_from_sender(self, sender: str, limit: int = 50) -> list[Email]:
+        """Return emails from a sender (case-insensitive), newest first."""
+        result = self._conn.execute(
+            """
+            SELECT id, thread_id, subject, sender,
+                   recipients, cc, bcc, date,
+                   message_id, in_reply_to, "references",
+                   snippet, body_plain, body_html,
+                   labels, attachment_meta, organized
+            FROM emails
+            WHERE sender ILIKE ?
+            ORDER BY date DESC NULLS LAST
+            LIMIT ?
+            """,
+            [f"%{sender}%", limit],
+        )
+        return self._rows_to_emails(result)
+
+    # ------------------------------------------------------------------
     # Search & filter
     # ------------------------------------------------------------------
 
-    def search(self, query: str, limit: int = 50) -> list[Email]:
+    def search_emails(self, query: str, limit: int = 50) -> list[Email]:
         """Search emails by subject and body (case-insensitive).
 
         Returns empty list for blank queries. LIKE metacharacters (%, _)
@@ -336,9 +375,12 @@ class EmailCache:
     def update_sync_state(self) -> None:
         """Update sync_state with the newest email date and total count."""
         self._conn.execute("""
-            INSERT OR REPLACE INTO sync_state (id, last_sync_date, total_cached)
+            INSERT INTO sync_state (id, last_sync_date, total_cached)
             SELECT 1, MAX(date), COUNT(*)
             FROM emails
+            ON CONFLICT (id) DO UPDATE SET
+                last_sync_date = EXCLUDED.last_sync_date,
+                total_cached   = EXCLUDED.total_cached
         """)
 
     # ------------------------------------------------------------------

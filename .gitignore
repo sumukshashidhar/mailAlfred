@@ -2,6 +2,7 @@
 plan.md
 credentials.json
 token.json
+token_calendar.json
 .env
 data/
 *.duckdb
