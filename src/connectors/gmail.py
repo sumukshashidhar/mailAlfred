@@ -39,6 +39,7 @@ class Gmail:
         self._credentials_path = credentials_path
         self._token_path = token_path
         self._service = None
+        self._lock = asyncio.Lock()  # httplib2 is not thread-safe
 
     # ------------------------------------------------------------------
     # Auth
@@ -392,38 +393,94 @@ class Gmail:
         batch_size: int = 100,
         max_emails: int = 0,
     ) -> list[Email]:
-        """Fetch emails matching query, with pagination, asynchronously.
+        """Fetch emails matching query, with pagination, asynchronously."""
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._fetch_all_messages_sync, query, after_date, batch_size, max_emails
+            )
 
-        Args:
-            max_emails: Stop after fetching this many. 0 means no limit.
-        """
-        return await asyncio.to_thread(
-            self._fetch_all_messages_sync, query, after_date, batch_size, max_emails
-        )
+    async def list_message_ids(
+        self,
+        query: str = "",
+        max_results: int = 100,
+        page_token: str | None = None,
+    ) -> tuple[list[str], str | None]:
+        """Return a page of message IDs matching the query."""
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._list_message_ids_sync, query, max_results, page_token,
+            )
+
+    def _list_message_ids_sync(
+        self,
+        query: str,
+        max_results: int,
+        page_token: str | None,
+    ) -> tuple[list[str], str | None]:
+        service = self._get_service()
+        kwargs: dict = {"userId": "me", "maxResults": max_results}
+        if query:
+            kwargs["q"] = query
+        if page_token:
+            kwargs["pageToken"] = page_token
+        response = service.users().messages().list(**kwargs).execute()
+        ids = [m["id"] for m in response.get("messages", [])]
+        return ids, response.get("nextPageToken")
+
+    async def batch_get_emails(self, email_ids: list[str]) -> list[Email]:
+        """Fetch multiple emails in a single batched HTTP request."""
+        async with self._lock:
+            return await asyncio.to_thread(self._batch_get_emails_sync, email_ids)
+
+    def _batch_get_emails_sync(self, email_ids: list[str]) -> list[Email]:
+        """Use Gmail BatchHttpRequest to fetch many messages at once."""
+        service = self._get_service()
+        results: dict[str, Email] = {}
+
+        def _callback(request_id, response, exception):
+            if exception is not None:
+                return
+            results[request_id] = self._parse_message(response)
+
+        batch = service.new_batch_http_request(callback=_callback)
+        for eid in email_ids:
+            batch.add(
+                service.users().messages().get(userId="me", id=eid, format="full"),
+                request_id=eid,
+            )
+        batch.execute()
+
+        # Return in original order
+        return [results[eid] for eid in email_ids if eid in results]
 
     async def get_unread_emails(self, max_results: int = 10) -> list[Email]:
         """Fetch unread emails asynchronously."""
-        return await asyncio.to_thread(self._fetch_messages_sync, max_results)
+        async with self._lock:
+            return await asyncio.to_thread(self._fetch_messages_sync, max_results)
 
     async def get_thread(self, thread_id: str) -> list[Email]:
         """Fetch all messages in a thread, asynchronously."""
-        return await asyncio.to_thread(self._get_thread_sync, thread_id)
+        async with self._lock:
+            return await asyncio.to_thread(self._get_thread_sync, thread_id)
 
     async def get_email(self, email_id: str) -> Email:
         """Fetch a single email by ID asynchronously."""
-        return await asyncio.to_thread(self._fetch_message_sync, email_id)
+        async with self._lock:
+            return await asyncio.to_thread(self._fetch_message_sync, email_id)
 
     async def download_attachment(
         self, message_id: str, attachment_id: str
     ) -> bytes:
         """Download attachment data asynchronously."""
-        return await asyncio.to_thread(
-            self._download_attachment_sync, message_id, attachment_id
-        )
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._download_attachment_sync, message_id, attachment_id
+            )
 
     async def list_labels(self) -> list[dict]:
         """List all Gmail labels asynchronously."""
-        return await asyncio.to_thread(self._list_labels_sync)
+        async with self._lock:
+            return await asyncio.to_thread(self._list_labels_sync)
 
     async def apply_labels(
         self,
@@ -432,6 +489,7 @@ class Gmail:
         remove_label_ids: list[str] | None = None,
     ) -> dict:
         """Modify labels on a message asynchronously."""
-        return await asyncio.to_thread(
-            self._apply_labels_sync, email_id, add_label_ids, remove_label_ids
-        )
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._apply_labels_sync, email_id, add_label_ids, remove_label_ids
+            )

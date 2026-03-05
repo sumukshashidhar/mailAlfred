@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import os
+import re
 from datetime import datetime
 
 from agents import Agent, ModelSettings, RunContextWrapper, function_tool
+from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from jinja2 import Environment, FileSystemLoader
-from openai.types.shared import Reasoning
+from langfuse.openai import AsyncOpenAI
 
 from src.agents.context import PROMPTS_DIR, PipelineContext
 from src.models import Email
@@ -274,17 +277,33 @@ def build_triage_agent(
         calendar_context=calendar_context,
     )
 
+    model_name = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
+    base_url = os.environ.get("OPENAI_BASE_URL", "")
+
+    # Use chat completions for non-OpenAI endpoints (vLLM, etc.)
+    if base_url:
+        client = AsyncOpenAI(base_url=base_url, timeout=900.0)
+        model = OpenAIChatCompletionsModel(model=model_name, openai_client=client)
+    else:
+        model = model_name
+
     return Agent(
         name="Triage Agent",
         instructions=instructions,
-        model="gpt-5-mini",
+        model=model,
         model_settings=ModelSettings(
-            reasoning=Reasoning(effort="medium", summary="auto"),
             metadata={"version": "v2"},
-            extra_args={"service_tier": "flex"},
         ),
         tools=ALL_TOOLS,
     )
+
+
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _strip_urls(text: str) -> str:
+    """Remove URLs from text to reduce context bloat."""
+    return _URL_RE.sub("[link]", text)
 
 
 def _format_email(email: Email) -> str:
@@ -300,7 +319,8 @@ def _format_email(email: Email) -> str:
     parts.append(f"Date: {email.date}")
     parts.append(f"Subject: {email.subject}")
     parts.append("")
-    parts.append(email.body_plain or email.snippet or "(no body)")
+    body = email.body_plain or email.snippet or "(no body)"
+    parts.append(_strip_urls(body))
     return "\n".join(parts)
 
 

@@ -1,9 +1,10 @@
-"""Email triage pipeline: fetch untriaged emails from Gmail, classify, and act."""
+"""Email triage pipeline: producer-consumer pattern for continuous fetch + classify."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 from pathlib import Path
 
 from agents import Runner
@@ -18,10 +19,14 @@ from src.labels import LabelResolver, TRIAGE_TO_GMAIL
 from src.models import Email
 
 STATE_FILE = Path("mailalfred_state.json")
+SENTINEL = None  # signals producer is done
 
+
+# ------------------------------------------------------------------
+# High water mark persistence (stream mode only)
+# ------------------------------------------------------------------
 
 def _load_high_water_mark() -> str | None:
-    """Load the last processed date from state file."""
     if STATE_FILE.exists():
         data = json.loads(STATE_FILE.read_text())
         return data.get("high_water_mark")
@@ -29,13 +34,39 @@ def _load_high_water_mark() -> str | None:
 
 
 def _save_high_water_mark(date_str: str) -> None:
-    """Save the high water mark to state file."""
     STATE_FILE.write_text(json.dumps({"high_water_mark": date_str}))
 
 
+# ------------------------------------------------------------------
+# Shared setup
+# ------------------------------------------------------------------
+
+async def _setup() -> tuple[Gmail, Gmail, Todoist, Calendar, LabelResolver, str, dict[str, str], str]:
+    """Returns (gmail_fetch, gmail_tools, todoist, calendar, label_resolver, ...).
+
+    Two separate Gmail instances because httplib2 is not thread-safe.
+    gmail_fetch is used by the producer, gmail_tools by the consumer/agent tools.
+    """
+    gmail_fetch = Gmail()
+    gmail_tools = Gmail()
+    todoist = Todoist()
+    calendar = Calendar()
+
+    label_resolver = LabelResolver()
+    await label_resolver.initialize(gmail_fetch)
+
+    logger.info("Pre-fetching Todoist and Calendar context...")
+    todoist_result, calendar_ctx = await asyncio.gather(
+        fetch_todoist_context(todoist),
+        fetch_calendar_context(calendar),
+    )
+    todoist_ctx, todoist_project_ids = todoist_result
+
+    return gmail_fetch, gmail_tools, todoist, calendar, label_resolver, todoist_ctx, todoist_project_ids, calendar_ctx
+
+
 def _build_untriaged_query(label_resolver: LabelResolver) -> str:
-    """Build a Gmail search query for emails without any triage label."""
-    # Exclude emails that already have any of our triage labels
+    """Gmail query that excludes emails already carrying any c/ label."""
     excludes = []
     for gmail_name in TRIAGE_TO_GMAIL.values():
         label_id = label_resolver._name_to_id.get(gmail_name)
@@ -44,64 +75,82 @@ def _build_untriaged_query(label_resolver: LabelResolver) -> str:
     return " ".join(excludes)
 
 
-async def run_pipeline(limit: int = 50, max_concurrent: int = 1) -> list[dict]:
-    """Run the full email triage pipeline.
+# ------------------------------------------------------------------
+# Producer: fetches emails page-by-page, pushes onto queue
+# ------------------------------------------------------------------
 
-    1. Fetch untriaged emails directly from Gmail.
-    2. Pre-fetch Todoist and Calendar context.
-    3. Build the triage agent.
-    4. Process emails sequentially or with limited concurrency.
+async def _producer(
+    gmail: Gmail,
+    query: str,
+    queue: asyncio.Queue,
+    max_emails: int = 0,
+) -> None:
+    """Fetch emails from Gmail in batched pages and feed them into the queue."""
+    try:
+        page_token = None
+        count = 0
+        batch_size = 100
 
-    Returns:
-        List of result dicts with email_id, subject, and outcome.
-    """
-    # --- Init connectors ---
-    gmail = Gmail()
-    todoist = Todoist()
-    calendar = Calendar()
+        while True:
+            if max_emails > 0:
+                remaining = max_emails - count
+                if remaining <= 0:
+                    break
+                page_size = min(batch_size, remaining)
+            else:
+                page_size = batch_size
 
-    # --- Resolve label IDs ---
-    logger.info("Resolving Gmail label IDs...")
-    label_resolver = LabelResolver()
-    await label_resolver.initialize(gmail)
+            stubs, next_token = await gmail.list_message_ids(
+                query=query, max_results=page_size, page_token=page_token,
+            )
 
-    # --- Fetch untriaged emails from Gmail ---
-    query = _build_untriaged_query(label_resolver)
-    hwm = _load_high_water_mark()
-    if hwm:
-        query = f"{query} after:{hwm}"
-    query = f"{query} in:inbox"
+            if not stubs:
+                break
 
-    logger.info(f"Fetching untriaged emails (query: {query})...")
-    emails = await gmail.fetch_all_emails(query=query, max_emails=limit)
-    logger.info(f"Found {len(emails)} untriaged emails.")
+            # Batch fetch all messages in one HTTP request
+            emails = await gmail.batch_get_emails(stubs)
 
-    if not emails:
-        logger.info("No untriaged emails to process.")
-        return []
+            for email in emails:
+                await queue.put(email)
+                count += 1
+                if max_emails > 0 and count >= max_emails:
+                    break
 
-    # --- Pre-fetch context (parallel) ---
-    logger.info("Pre-fetching Todoist and Calendar context...")
-    todoist_result, calendar_ctx = await asyncio.gather(
-        fetch_todoist_context(todoist),
-        fetch_calendar_context(calendar),
-    )
-    todoist_ctx, todoist_project_ids = todoist_result
+            logger.info(f"[producer] Queued {count} emails so far...")
 
-    # --- Build agent ---
+            page_token = next_token
+            if not page_token:
+                break
+
+    finally:
+        await queue.put(SENTINEL)
+        logger.info(f"[producer] Done. Total queued: {count}")
+
+
+# ------------------------------------------------------------------
+# Consumer: pulls emails from queue, classifies them
+# ------------------------------------------------------------------
+
+async def _consumer(
+    queue: asyncio.Queue,
+    gmail: Gmail,
+    todoist: Todoist,
+    calendar: Calendar,
+    label_resolver: LabelResolver,
+    todoist_ctx: str,
+    todoist_project_ids: dict[str, str],
+    calendar_ctx: str,
+    results: list[dict],
+    semaphore: asyncio.Semaphore,
+) -> None:
+    """Pull emails from queue and classify until sentinel is received."""
     agent = build_triage_agent(todoist_context=todoist_ctx, calendar_context=calendar_ctx)
 
-    # --- Process emails ---
-    semaphore = asyncio.Semaphore(max_concurrent)
-    results: list[dict] = []
-
-    async def process_one(email: Email) -> dict:
+    async def classify(email: Email) -> dict:
         async with semaphore:
-            logger.info(f"Triaging: {email.subject[:60]}...")
+            logger.info(f"[classify] {email.subject[:60]}...")
             try:
-                # Fetch thread for context
                 thread = await gmail.get_thread(email.thread_id)
-
                 context = PipelineContext(
                     gmail=gmail,
                     label_resolver=label_resolver,
@@ -110,14 +159,12 @@ async def run_pipeline(limit: int = 50, max_concurrent: int = 1) -> list[dict]:
                     todoist=todoist,
                     todoist_project_ids=todoist_project_ids,
                 )
-
                 result = await Runner.run(
                     agent,
                     input=render_email_input(email, thread),
                     context=context,
                 )
-
-                logger.info(f"Done: {email.subject[:60]}")
+                logger.info(f"[done] {email.subject[:60]}")
                 return {
                     "email_id": email.id,
                     "subject": email.subject,
@@ -125,7 +172,7 @@ async def run_pipeline(limit: int = 50, max_concurrent: int = 1) -> list[dict]:
                     "output": str(result.final_output)[:200],
                 }
             except Exception as e:
-                logger.error(f"Failed: {email.subject[:60]} -> {e}")
+                logger.error(f"[fail] {email.subject[:60]} -> {e}")
                 return {
                     "email_id": email.id,
                     "subject": email.subject,
@@ -133,16 +180,87 @@ async def run_pipeline(limit: int = 50, max_concurrent: int = 1) -> list[dict]:
                     "error": str(e),
                 }
 
-    results = list(await asyncio.gather(*(process_one(e) for e in emails)))
+    tasks: list[asyncio.Task] = []
 
-    # --- Update high water mark ---
-    dates = [e.date for e in emails if e.date]
-    if dates:
-        newest = max(dates)
-        _save_high_water_mark(newest.strftime("%Y/%m/%d"))
+    while True:
+        email = await queue.get()
+        if email is SENTINEL:
+            break
+        task = asyncio.create_task(classify(email))
+        tasks.append(task)
+
+    # Wait for all in-flight classifications to finish
+    if tasks:
+        done = await asyncio.gather(*tasks)
+        results.extend(done)
+
+
+# ------------------------------------------------------------------
+# Mode 1: Full process
+# ------------------------------------------------------------------
+
+async def run_full(limit: int = 0, max_concurrent: int = 64) -> list[dict]:
+    """Process ALL inbox emails that lack a c/ classification label.
+
+    Fetches and classifies concurrently (producer-consumer).
+    """
+    gmail_fetch, gmail_tools, todoist, calendar, label_resolver, todoist_ctx, project_ids, calendar_ctx = await _setup()
+
+    query = f"{_build_untriaged_query(label_resolver)} in:inbox"
+    logger.info(f"[full] Starting (query: {query})...")
+
+    queue: asyncio.Queue = asyncio.Queue(maxsize=max_concurrent * 2)
+    semaphore = asyncio.Semaphore(max_concurrent)
+    results: list[dict] = []
+
+    await asyncio.gather(
+        _producer(gmail_fetch, query, queue, max_emails=limit),
+        _consumer(queue, gmail_tools, todoist, calendar, label_resolver,
+                  todoist_ctx, project_ids, calendar_ctx, results, semaphore),
+    )
 
     ok = sum(1 for r in results if r["status"] == "ok")
     err = sum(1 for r in results if r["status"] == "error")
-    logger.info(f"Pipeline complete: {ok} succeeded, {err} failed.")
+    logger.info(f"[full] Complete: {ok} succeeded, {err} failed.")
+    return results
 
+
+# ------------------------------------------------------------------
+# Mode 2: Stream (high water mark)
+# ------------------------------------------------------------------
+
+async def run_stream(limit: int = 50, max_concurrent: int = 64) -> list[dict]:
+    """Process only emails newer than the last high water mark.
+
+    Falls back to full mode on first run (no saved mark).
+    """
+    hwm = _load_high_water_mark()
+    if not hwm:
+        logger.info("[stream] No high water mark found, falling back to full mode.")
+        return await run_full(limit=limit, max_concurrent=max_concurrent)
+
+    gmail_fetch, gmail_tools, todoist, calendar, label_resolver, todoist_ctx, project_ids, calendar_ctx = await _setup()
+
+    query = f"in:inbox after:{hwm}"
+    logger.info(f"[stream] Starting (query: {query})...")
+
+    queue: asyncio.Queue = asyncio.Queue(maxsize=max_concurrent * 2)
+    semaphore = asyncio.Semaphore(max_concurrent)
+    results: list[dict] = []
+
+    await asyncio.gather(
+        _producer(gmail_fetch, query, queue, max_emails=limit),
+        _consumer(queue, gmail_tools, todoist, calendar, label_resolver,
+                  todoist_ctx, project_ids, calendar_ctx, results, semaphore),
+    )
+
+    # Advance high water mark
+    ok_ids = [r for r in results if r["status"] == "ok"]
+    if ok_ids:
+        _save_high_water_mark(datetime.now().strftime("%Y/%m/%d"))
+        logger.info(f"[stream] High water mark updated to today.")
+
+    ok = sum(1 for r in results if r["status"] == "ok")
+    err = sum(1 for r in results if r["status"] == "error")
+    logger.info(f"[stream] Complete: {ok} succeeded, {err} failed.")
     return results
